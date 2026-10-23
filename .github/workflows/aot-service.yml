@@ -1,0 +1,30 @@
+name: AOT service publish (QA)
+on:
+  push:
+    branches: [ci/build-pr-qa]
+jobs:
+  aot:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Stub hb-mirror.json (not in git)
+        shell: pwsh
+        run: Set-Content KitveiHakodesh/CSharpBackend/KitveiHakodesh.Core/HebrewBooks/hb-mirror.json '{}'
+      - name: Publish native AOT service
+        shell: pwsh
+        run: dotnet publish KitveiHakodesh/CSharpBackend/KitveiHakodeshService/KitveiHakodeshService.csproj -c Release -r win-x64 -p:PublishDir="$PWD/aot-out/" --nologo 2>&1 | Tee-Object aot-publish.log
+      - name: Collect warnings
+        if: always()
+        shell: pwsh
+        run: Select-String -Path aot-publish.log -Pattern 'IL2|IL3|warning' | Select-Object -First 80 | ForEach-Object { $_.Line }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aot-service
+          path: |
+            aot-out/**
+            aot-publish.log
+          retention-days: 7
