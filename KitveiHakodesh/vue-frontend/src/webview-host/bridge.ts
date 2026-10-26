@@ -560,6 +560,31 @@ export async function catalogTocSearch(query: string): Promise<CatalogTocSearchR
   return serviceCall<CatalogTocSearchResult>('catalogTocSearch', { query })
 }
 
+/** Result of a book-title search (catalogTitleSearch wire shape, camelCased). The not-ready
+ *  fields mean what they mean on CatalogTocSearchResult. */
+export type CatalogTitleSearchResult = {
+  ready: boolean
+  /** Matching book ids, best first. Uncapped. */
+  bookIds: number[]
+  /** The index was reset under this search — discard and retry. */
+  superseded?: boolean
+  error?: string | null
+  dbMissing?: boolean
+  builtBooks?: number
+  totalBooks?: number
+  buildFailure?: string | null
+  retryingAfterBuildFailure?: boolean
+  waiting?: boolean
+}
+
+/**
+ * Search book titles (with catalog path and authors) in the catalog index — level-0 docs
+ * only, the last word also matched as a prefix. Same index and transport as catalogTocSearch.
+ */
+export async function catalogTitleSearch(query: string): Promise<CatalogTitleSearchResult> {
+  return serviceCall<CatalogTitleSearchResult>('catalogTitleSearch', { query })
+}
+
 /**
  * Wipe the catalog TOC (Lucene) index so it is rebuilt from the seforim DB.
  *
@@ -800,7 +825,7 @@ async function runPasteIntoWord(): Promise<{ ok?: boolean; error?: string }> {
 /**
  * Place a PNG image on the Windows clipboard via the C# host (hosted only).
  *
- * Needed because the host serves the app from http://KitveiHakodesh-vue-app/ — plain http on a
+ * Needed because the host serves the app from http://kitveihakodesh-app/ — plain http on a
  * non-localhost hostname, which Chromium treats as an INSECURE context, so navigator.clipboard
  * is not exposed there and C# must do it with System.Windows.Forms.Clipboard instead.
  *

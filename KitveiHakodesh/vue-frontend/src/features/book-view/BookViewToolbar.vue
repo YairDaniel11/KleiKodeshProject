@@ -397,6 +397,10 @@ defineExpose({ tocBtnRef })
       :inert="!toolbarButtonVisible('hebrewbooks-editions')"
       :editions="hebrewBooksEditions"
     />
+    <BookViewWordLinkMarkersDropdown
+      :book-id="bookId"
+      @presence-change="wordLinkMarkersPresent = $event"
+    />
     <!--
       RTL: first child sits physically right. The three buttons run right → bottom
       → left, so each sits on the side of the panel it controls. Both side panels
@@ -493,10 +497,6 @@ defineExpose({ tocBtnRef })
     </button>
 
     <BookViewCleanTextCombo />
-    <BookViewWordLinkMarkersDropdown
-      :book-id="bookId"
-      @presence-change="wordLinkMarkersPresent = $event"
-    />
 
     <button
       v-if="!exportRestricted"
@@ -684,7 +684,6 @@ defineExpose({ tocBtnRef })
   padding: var(--toolbar-horizontal-padding);
   background: var(--bg-toolbar);
   flex-shrink: 0;
-  transition: background 120ms;
   cursor: grab;
   touch-action: none;
 }

@@ -147,8 +147,8 @@ export function useBookView(
   } = useToc(() => bookId, () => bookTitle)
 
   const {
-    lines, prioritise, prefetch, holdBackfill, releaseBackfill,
-    hasCommentaries, hasRelatedBooks, hasTeamim: bookHasTeamim,
+    lines, prefetch, ensureLines, holdBackfill, releaseBackfill,
+    hasCommentaries, hasRelatedBooks, hasTeamim: bookHasTeamim, lineCharacterCounts,
     versions, activeVersionId, setVersion,
     hebrewBooksEditions,
   } = useLines(() => bookId)
@@ -654,9 +654,12 @@ export function useBookView(
     groups.value = []
   })
 
+  // The first text fetch is the window the view will open on — never line 0 on
+  // spec. Fired the moment the position is known, alongside the book metadata the
+  // view is still waiting for, so the opening render has its text.
   watch(
-    () => idbResolved.value && initialScrollTop.value != null,
-    (ready) => { if (ready) prefetch(initialScrollTop.value!) },
+    () => idbResolved.value,
+    (resolved) => { if (resolved) prefetch(initialLineIndex.value ?? initialScrollTop.value ?? 0) },
     { immediate: true },
   )
 
@@ -676,8 +679,8 @@ export function useBookView(
     // right away when no commentary panel is reopening.
     backfillGate.onSessionRestoreSettled()
 
-    // After session restore, the virtualizer has scrolled to the saved line index
-    // but onLinesScrolled has not fired yet, so tocPath is empty and the breadcrumb
+    // After session restore the lines scroller opens on the saved line index, but
+    // onLinesScrolled has not fired yet, so tocPath is empty and the breadcrumb
     // shows nothing. Sync it now using the restored scroll index.
     // If TOC entries are already loaded (common case), this is synchronous.
     // If not, watch for them to arrive (they load in parallel with session restore).
@@ -763,7 +766,7 @@ export function useBookView(
     tocPersistState,
     // data
     tabId, bookId,
-    lines, prioritise, hasCommentaries, hasRelatedBooks, hasToc,
+    lines, ensureLines, lineCharacterCounts, hasCommentaries, hasRelatedBooks, hasToc,
     groups, filterGroups, staticFilterGroups, commentaryLoading, commentaryLoadError, requestContentPriority,
     tocEntries, tocSearchTree, altTocSections, selectedAltTocSection, tocLoading, tocError,
     altTocLabelMap, selectedSectionLineIds, manualSelectionLineIds,
@@ -796,6 +799,6 @@ export function useBookView(
     toggleTocPanel: sidePanel.toggleTocPanel,
     closeSidePanel: sidePanel.closeSidePanel,
     ensureStaticFilterGroupsLoaded, staticFilterGroupsLoaded,
-    getActiveTocEntry, getTocPath,
+    getActiveTocEntry, getActiveAltTocEntry, getTocPath,
   }
 }
