@@ -7,7 +7,7 @@
 namespace KitveiHakodeshService.SeforimDb;
 
 // Result-row DTOs for the seforim DB, matching the Vue row shapes exactly
-// (camelCase on the wire). Registered in RpcJsonContext for AOT-safe serialization.
+// (camelCase on the wire), serialized by the source-generated MessagePack resolver.
 //
 // The frontend counterpart is vue-frontend/src/webview-host/queries.types.ts — the row
 // types live beside the SQL that produces them, so both sides of the wire point at the
@@ -62,6 +62,20 @@ public sealed class BookVersionsResult { public List<BookVersionRow> Rows { get;
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class LinesResult { public List<LineRow> Rows { get; set; } = new(); }
 
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class LineCharCountsArgs { public int BookId { get; set; } }
+
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class LineIdsByRangeArgs { public int BookId { get; set; } public int FromIndex { get; set; } public int ToIndex { get; set; } }
+
+/// <summary>Ids of the lines in [FromIndex, ToIndex) placed by lineIndex, 0 where a lineIndex has no row.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class LineIdsByRangeResult { public int[] Ids { get; set; } = Array.Empty<int>(); }
+
+/// <summary>Counts by lineIndex; null when the library has no <c>line.charCount</c> column.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class LineCharCountsResult { public int[]? Counts { get; set; } }
+
 // ── TOC ─────────────────────────────────────────────────────────────────────
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
@@ -100,6 +114,9 @@ public sealed class BookIdArgs { public int BookId { get; set; } }
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class CommentaryLinksResult { public List<CommentaryLinkRow> Rows { get; set; } = new(); }
+
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class CommentaryLinkGroupsResult { public List<CommentaryLinkGroupRow> Rows { get; set; } = new(); }
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class LineContentsResult { public List<LineContentRow> Rows { get; set; } = new(); }
@@ -236,6 +253,22 @@ public sealed class FtsSearchArgs
 
 // ── Streaming FTS (ftsSearchStream) — the service PUSHES result frames continuously
 //    over one pipe connection until the search finishes. No polling anywhere. ──
+
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class FtsSnippetsArgs
+{
+    public string? Query { get; set; }
+    public List<int>? LineIds { get; set; }
+    public bool RequireOrdered { get; set; }
+    public int ContextWords { get; set; } = 8;
+}
+
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class FtsLinesSearchArgs
+{
+    public string? Query { get; set; }
+    public List<global::KitveiHakodesh.Core.SeforimDbFullTextSearch.FtsLineRange>? Ranges { get; set; }
+}
 
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
 public sealed class FtsSearchStreamArgs

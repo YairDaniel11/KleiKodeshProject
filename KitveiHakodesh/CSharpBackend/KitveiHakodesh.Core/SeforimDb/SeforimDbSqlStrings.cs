@@ -82,6 +82,31 @@ namespace KitveiHakodesh.Core.SeforimDb
 
         // ── Lines ─────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Every line's character count for one book, by lineIndex — the reader's
+        /// scrollbar estimates row heights from these without loading any text.
+        /// Only valid on libraries whose <c>line</c> table has the column.
+        /// </summary>
+        public const string GetLineCharCounts = @"
+            SELECT lineIndex, charCount
+            FROM line
+            WHERE bookId = @bookId
+            ORDER BY lineIndex";
+
+        /// <summary>The ids of a book's lines in [from, to) by lineIndex — no text.</summary>
+        public const string GetLineIds = @"
+            SELECT lineIndex, id
+            FROM line
+            WHERE bookId = @bookId AND lineIndex >= @fromIndex AND lineIndex < @toIndex
+            ORDER BY lineIndex";
+
+        /// <summary><see cref="GetLineIds"/> on an attached library's own table.</summary>
+        public static string GetLineIdsIn(string librarySchema) => $@"
+            SELECT lineIndex, id
+            FROM {librarySchema}.line
+            WHERE bookId = @bookId AND lineIndex >= @fromIndex AND lineIndex < @toIndex
+            ORDER BY lineIndex";
+
         /// <summary>A page of lines for streaming load.</summary>
         public static string GetLinesPaged(SeforimDbSchema schema) => $@"
             SELECT l.id, l.lineIndex, {SeforimDbLineContentSql.ContentColumn(schema, "l")}
@@ -228,6 +253,24 @@ namespace KitveiHakodesh.Core.SeforimDb
             FROM link l
             JOIN line ln ON ln.id = l.targetLineId
             WHERE l.sourceLineId IN ({InPlaceholders("p", count)})";
+
+        /// <summary>Grouped/de-duplicated variant of GetCommentaryLinksForSourceLineRange: ordered so
+        /// the reader can cut groups on a (book, type) change; DISTINCT because a range of source
+        /// lines links the same target line many times over.</summary>
+        public static string GetCommentaryLinkGroupsForSourceLineRange(int count, bool hasTargetLineIndex) => hasTargetLineIndex
+            ? $@"
+            SELECT DISTINCT l.targetBookId, l.connectionTypeId, l.targetLineId,
+                   l.targetLineIndex AS lineIndex
+            FROM link l
+            WHERE l.sourceLineId IN ({InPlaceholders("p", count)})
+            ORDER BY l.targetBookId, l.connectionTypeId, lineIndex, l.targetLineId"
+            : $@"
+            SELECT DISTINCT l.targetBookId, l.connectionTypeId, l.targetLineId,
+                   ln.lineIndex
+            FROM link l
+            JOIN line ln ON ln.id = l.targetLineId
+            WHERE l.sourceLineId IN ({InPlaceholders("p", count)})
+            ORDER BY l.targetBookId, l.connectionTypeId, ln.lineIndex, l.targetLineId";
 
         /// <summary>Content backfill for a batch of line ids.</summary>
         public static string GetLineContents(SeforimDbSchema schema, int count) =>
@@ -775,6 +818,27 @@ namespace KitveiHakodesh.Core.SeforimDb
             "SELECT l.id, " + C_ContentColumn(schema, "l") +
             " FROM line l" + C_ContentJoin(schema, "l") +
             " WHERE l.bookId = @b ORDER BY l.lineIndex, l.id LIMIT -1 OFFSET @skip";
+
+        /// <summary>One chunk of search-result TEXT for verification (locate, filters, snippets):
+        /// id and content only, read by primary key from the table that holds the text -
+        /// `line_content` on a split database (no `line` row, no join), else `line`. A line
+        /// with no text row is absent (it cannot match anyway). Placement is a separate,
+        /// later read (<see cref="FtsFetchPlacements"/>) for the hits that pass.</summary>
+        internal static string FtsFetchLines(SeforimDbSchema schema, int count) =>
+            (schema.HasSplitLineContent ? "SELECT id, content FROM line_content" : "SELECT id, content FROM line") +
+            " WHERE id IN (" + InPlaceholders("p", count) + ")";
+
+        /// <summary>One chunk of PLACEMENTS: id, bookId, lineIndex and the line's own TOC entry
+        /// (0 when none; `line_toc` when the database has it, else `line.tocEntryId`). No text.
+        /// Read after verification, for the hits that passed.</summary>
+        internal static string FtsFetchPlacements(SeforimDbSchema schema, int count) =>
+            "SELECT l.id, l.bookId, l.lineIndex, " +
+            (schema.HasLineTocTable ? "COALESCE(lt.tocEntryId, 0)"
+             : schema.HasLineTocEntryIdColumn ? "COALESCE(l.tocEntryId, 0)"
+             : "0") +
+            " FROM line l" +
+            (schema.HasLineTocTable ? " LEFT JOIN line_toc lt ON lt.lineId = l.id" : "") +
+            " WHERE l.id IN (" + InPlaceholders("p", count) + ")";
 
         /// <summary>One chunk of search-result rows: id, content, and the line's PLACEMENT -
         /// bookId, lineIndex and its own TOC entry (0 when it has none) - read off the same

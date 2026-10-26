@@ -45,18 +45,26 @@ const BOOK_ID = 7
 
 /** Mounts the composable the way BookViewLinesContent does, on a scroller sitting at line 3. */
 function mountScroll(tabId: string) {
-  const scroller = document.createElement('div')
+  const scrollerElement = document.createElement('div')
+  const scroller = {
+    scrollerElement,
+    scrollbarElement: null,
+    renderedRange: { start: 0, end: 10 },
+    scrollToIndex: vi.fn(async () => undefined),
+    readFirstVisible: () => ({ index: 3, offsetWithinRow: 0 }),
+    isRowRendered: () => true,
+    isRowFullyVisible: () => true,
+    rowElement: () => null,
+    barTargetAt: () => null,
+  }
   let scroll!: ReturnType<typeof useBookViewLinesScroll>
   const app = createApp({
     setup() {
       scroll = useBookViewLinesScroll(
-        ref(scroller),
-        () => ({ scrollToIndex: vi.fn(), scrollToOffset: vi.fn() }) as never,
-        () => [{ index: 3, start: 0, size: 20, end: 20, key: 3, lane: 0 }],
+        () => scroller,
         () => [],
         {},
         { tabStore: useTabStore(), bookViewStore: useBookViewStore(), autoSelectTopLine: ref(false), zoom: ref(100), tabId, bookId: BOOK_ID },
-        () => undefined,
         () => undefined,
       )
       return () => null

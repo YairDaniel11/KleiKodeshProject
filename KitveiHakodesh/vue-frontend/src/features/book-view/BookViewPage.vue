@@ -61,11 +61,11 @@ const {
   tocVisible,
   sidePanelVisible, sidePanelToggleButtonEl,
   panels, anyCommentaryVisible, openCommentarySlots, commentaryPersistState, tocPersistState,
-  tabId, bookId, lines, prioritise, hasCommentaries, hasRelatedBooks, hasToc,
+  tabId, bookId, lines, linesRevision, ensureLines, ensureAllLines, lineCharacterCounts, hasCommentaries, hasRelatedBooks, hasToc,
   bookHasTeamim,
   versions, activeVersionId, selectVersion, versionPersistState,
   hebrewBooksEditions,
-  filterGroups, staticFilterGroups, commentaryLoading, commentaryLoadError, requestContentPriority,
+  filterGroups, staticFilterGroups, commentaryLoading, commentaryLoadError, ensureLineContents, trimLineContents,
   tocEntries, tocSearchTree, selectedAltTocSection, tocLoading, tocError,
   altTocLabelMap, selectedSectionLineIds, manualSelectionLineIds,
   getHighlightsForLine, applyHighlight, clearHighlight,
@@ -84,7 +84,7 @@ const {
   onQueryChange, onSearchNext, onSearchPrev, onModeChange,
   toggleTocPanel, closeSidePanel,
   ensureStaticFilterGroupsLoaded, staticFilterGroupsLoaded,
-  getActiveTocEntry, getTocPath,
+  getActiveTocEntry, getActiveAltTocEntry, getTocPath,
   bookTitle,
 } = useBookView(
   () => toolbarRef.value,
@@ -128,7 +128,8 @@ const commentarySharedProps = computed(() => ({
   prepareExportData: prepareCommentaryExportData,
   prepareExportTargets: prepareCommentaryExportTargets,
   resolveWordLinkTarget: resolveCommentaryWordLinkTarget,
-  requestContentPriority,
+  ensureLineContents,
+  trimLineContents,
   createNote,
   updateNote,
   deleteNote,
@@ -563,7 +564,10 @@ function getSideEditionOutlineTarget(): string | undefined {
                     :key="sideColumnsKey"
                     ref="linesContentRef"
                     :lines="lines"
-                    :prioritise="prioritise"
+                    :lines-revision="linesRevision"
+                    :ensure-lines="ensureLines"
+                    :ensure-all-lines="ensureAllLines"
+                    :line-character-counts="lineCharacterCounts"
                     :alt-toc-label-map="altTocLabelMap"
                     :selected-line-id="selectedLineId"
                     :commentary-visible="anyCommentaryVisible"
@@ -586,7 +590,9 @@ function getSideEditionOutlineTarget(): string | undefined {
                     :current-match-line-index="searchVisible && searchMode === 'content' ? contentSearch.currentMatchLineIndex.value : undefined"
                     :current-match-occurrence="searchVisible && searchMode === 'content' ? contentSearch.currentMatchOccurrence.value : undefined"
                     :get-active-toc-entry="getActiveTocEntry"
+                    :get-active-alt-toc-entry="getActiveAltTocEntry"
                     :get-toc-path="getTocPath"
+                    :toc-entries="tocEntries"
                     :selected-section-line-ids="selectedSectionLineIds"
                     :multi-select-line-ids="manualSelectionLineIds"
                     :book-has-teamim="bookHasTeamim"

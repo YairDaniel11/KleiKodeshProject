@@ -17,7 +17,7 @@ namespace KleiKodeshVstoInstallerWpf
     /// </summary>
     public static class UiLanguage
     {
-        const string Section = "Installer";
+        const string Section = "General"; // shared with the Word add-in (KleiKodeshVsto/Helpers/AddinUiLanguage.cs)
         const string Key     = "UiLanguage";
 
         public const string Hebrew  = "he";
@@ -48,6 +48,9 @@ namespace KleiKodeshVstoInstallerWpf
             SettingsManager.Save(Section, Key, lang);
         }
 
+        /// <summary>Writes the current language back, e.g. after a clean wiped the settings.</summary>
+        public static void Persist() => SettingsManager.Save(Section, Key, Current);
+
         static void Apply(string lang)
         {
             typeof(Properties.Strings)
@@ -63,17 +66,17 @@ namespace KleiKodeshVstoInstallerWpf
     /// <summary>Resolves culture texts from "<base>.<lang>.resources" inside the exe.</summary>
     sealed class EmbeddedCultureResourceManager : ResourceManager
     {
-        const string BaseName = "KleiKodeshVstoInstallerWpf.Properties.Strings";
+        const string StringsBaseName = "KleiKodeshVstoInstallerWpf.Properties.Strings";
         public static readonly EmbeddedCultureResourceManager Instance = new EmbeddedCultureResourceManager();
 
-        EmbeddedCultureResourceManager() : base(BaseName, typeof(Properties.Strings).Assembly) { }
+        EmbeddedCultureResourceManager() : base(StringsBaseName, typeof(Properties.Strings).Assembly) { }
 
         protected override ResourceSet InternalGetResourceSet(CultureInfo culture, bool createIfNotExists, bool tryParents)
         {
             if (!culture.Equals(CultureInfo.InvariantCulture))
             {
                 var stream = MainAssembly.GetManifestResourceStream(
-                    BaseName + "." + culture.TwoLetterISOLanguageName + ".resources");
+                    StringsBaseName + "." + culture.TwoLetterISOLanguageName + ".resources");
                 if (stream != null) return new ResourceSet(stream);
             }
             return base.InternalGetResourceSet(culture, createIfNotExists, tryParents);

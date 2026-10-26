@@ -48,7 +48,8 @@ interface CopyMenuOptions {
   paneNavigation?: PaneNavigation
   getActiveTocEntry?: (lineIndex: number) => TocEntry | null
   getTocPath?: (entry: TocEntry) => string
-  getNotesForLine?: (lineId: number) => Note[]
+  /** A note by its id, for the endnotes of a copy with notes. */
+  getNoteById?: (noteId: number) => Note | undefined
   getRenderedLineContent?: (raw: string, lineIndex: number, lineId: number) => string
   onHighlight?: (colorArgb: number) => void
   onClearHighlight?: () => void
@@ -66,6 +67,11 @@ interface CopyMenuOptions {
    * select-all case is additionally warmed the moment the selection is made.
    */
   prepareForLines?: (lineIds: number[]) => Promise<void>
+  /**
+   * Fetches every line of the book. Select-all copies the whole book, and lines are
+   * only ever fetched on demand, so the copy asks for them when the user selects all.
+   */
+  ensureAllLines: () => Promise<void>
   /** Resolves only the citations already rendered in a fragment — the selection path. */
   prepareForRenderedHtml?: (html: string) => Promise<void>
   /** Resolves one point citation's target for its endnote. Synchronous by necessity. */
@@ -277,14 +283,11 @@ export function buildBookExportHtml(
   lines: LineItem[],
   bookTitle: string,
   renderLine: (raw: string, lineIndex: number, lineId: number) => string,
-  getNotesForLine: (lineId: number) => Note[],
+  getNoteById: (noteId: number) => Note | undefined,
 ): string {
   function resolveNote(noteId: number): { noteText: string; quote: string } | undefined {
-    for (const lineItem of lines) {
-      const found = getNotesForLine(lineItem.id).find((n) => n.id === noteId)
-      if (found) return { noteText: found.note, quote: found.quote }
-    }
-    return undefined
+    const found = getNoteById(noteId)
+    return found ? { noteText: found.note, quote: found.quote } : undefined
   }
 
   const renderedLines = lines
@@ -470,17 +473,11 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
     let html: string
     let endnotesHtml = ''
     if (settingsStore.copyWithNotes) {
-      // Resolve a note by its (globally-unique) id by scanning the lines model, not
-      // the DOM. Note markers in `joined` only ever come from rendered lines, but the
-      // note *data* lives in the model — so scanning lines() works identically whether
-      // the owning row is currently virtualized in or out, and needs no DOM round-trip.
+      // Resolve a note by its (globally-unique) id from the notes model, not the
+      // DOM: it works identically whether the owning row is mounted or not.
       function resolveNote(noteId: number): { noteText: string; quote: string } | undefined {
-        if (!options.getNotesForLine) return undefined
-        for (const lineItem of lines()) {
-          const found = options.getNotesForLine(lineItem.id).find((n) => n.id === noteId)
-          if (found) return { noteText: found.note, quote: found.quote }
-        }
-        return undefined
+        const found = options.getNoteById?.(noteId)
+        return found ? { noteText: found.note, quote: found.quote } : undefined
       }
       const { html: extracted, endnotes } = extractEndnotes(joined, resolveNote)
       // The DB's own citations travel with the user's notes: a range citation
@@ -607,20 +604,31 @@ export function useBookViewLineCopyMenu(options: CopyMenuOptions): { items: Cont
         // the budget the copy goes ahead with whatever has arrived; the load keeps running
         // and the next copy has it all.
         const prepared = isSelectAll.value
-          ? options.prepareForLines?.(lines().map((l) => l.id))
+          ? wholeBookReady().then(() => options.prepareForLines?.(lines().map((l) => l.id)))
           : options.prepareForRenderedHtml?.(selectionHtml())
         if (prepared) await awaitWithinActivationWindow(prepared)
       } catch { /* export degrades; proceed */ }
+    } else if (isSelectAll.value) {
+      try { await awaitWithinActivationWindow(wholeBookReady()) } catch { /* copy what is loaded */ }
     }
     triggerCopy(afterCopy)
+  }
+
+  // The whole book's text, fetched once per select-all (started the moment the user
+  // selects all, below, so the copy rarely has to wait for it).
+  let wholeBook: Promise<void> | null = null
+  function wholeBookReady(): Promise<void> {
+    return (wholeBook ??= options.ensureAllLines().finally(() => { wholeBook = null }))
   }
 
   // Select-all is the one case whose warm-up can be big, so it runs here — outside
   // any clipboard gesture — rather than inside the copy action. Covers both routes
   // into select-all (Ctrl+A and the menu item), since both set this flag.
   watch(isSelectAll, (on) => {
-    if (!on || !settingsStore.copyWithNotes || !options.prepareForLines) return
-    void options.prepareForLines(lines().map((l) => l.id))
+    if (!on) return
+    const loading = wholeBookReady()
+    if (!settingsStore.copyWithNotes || !options.prepareForLines) return
+    void loading.then(() => options.prepareForLines?.(lines().map((l) => l.id)))
   })
 
   function onCopy(): void {

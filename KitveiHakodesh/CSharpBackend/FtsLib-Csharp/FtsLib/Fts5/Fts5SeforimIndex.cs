@@ -43,13 +43,15 @@ namespace FtsLib.Fts5
 
         /// <param name="batchSizeAt">The caller's batch plan — see
         /// <see cref="Fts5SearchEngine.Search"/>.</param>
+        /// <param name="withPlacement">See <see cref="Fts5SearchEngine.Search"/>.</param>
         public IEnumerable<SearchResult> Search(string query, int cap = 0,
                                                 IEnumerable<int> filterIds = null, CancellationToken ct = default,
-                                                Action<string> onStage = null, Func<int, int> batchSizeAt = null)
+                                                Action<string> onStage = null, Func<int, int> batchSizeAt = null,
+                                                bool withPlacement = true)
         {
             if (!IsBuilt) yield break;
             using var engine = new Fts5SearchEngine(_indexPath, _openCorpus);
-            foreach (var result in engine.Search(query, cap, filterIds, ct, onStage, batchSizeAt))
+            foreach (var result in engine.Search(query, cap, filterIds, ct, onStage, batchSizeAt, withPlacement))
                 yield return result;
         }
 
@@ -60,6 +62,33 @@ namespace FtsLib.Fts5
             using var engine = new Fts5SearchEngine(_indexPath, _openCorpus);
             foreach (int id in engine.SearchIds(query, filterIds, ct))
                 yield return id;
+        }
+
+        /// <summary>
+        /// Substring candidates inside blocks of positions — see
+        /// <see cref="Fts5SearchEngine.FindSubstringCandidates"/>. Null whenever the index
+        /// cannot answer exactly, including while it is still being built: only a complete
+        /// index has every committed line's terms in its dictionary.
+        /// </summary>
+        public List<(int Range, long Position, int LineId)> FindSubstringCandidates(
+            string query, IReadOnlyList<(long First, long Last)> ranges, int maxTermsPerFragment, CancellationToken ct = default)
+        {
+            if (!IsBuilt) return null;
+            var state = Fts5Index.ReadBuildState(_indexPath);
+            if (state == null || !state.Value.Complete) return null;
+            using var engine = new Fts5SearchEngine(_indexPath, _openCorpus);
+            return engine.FindSubstringCandidates(query, ranges, maxTermsPerFragment, ct);
+        }
+
+        /// <summary>
+        /// The given lines as matches of <paramref name="query"/>, read without running the
+        /// full-text MATCH — see <see cref="Fts5SearchEngine.MatchesForLines"/>.
+        /// </summary>
+        public List<SearchResult> MatchesForLines(string query, IReadOnlyList<int> lineIds, CancellationToken ct = default)
+        {
+            if (!IsBuilt) return new List<SearchResult>();
+            using var engine = new Fts5SearchEngine(_indexPath, _openCorpus);
+            return engine.MatchesForLines(query, lineIds, ct);
         }
 
         // ── Snippet windows (FtsLib's own, unchanged) ────────────────

@@ -64,6 +64,8 @@ watch(
 
 const {
   results,
+  resultsVersion,
+  resultCount,
   matchedTermsOf,
   isSearching,
   stageLabel,
@@ -74,6 +76,7 @@ const {
   requireOrdered,
   allWords,
   setAllWords,
+  perWord,
   sortOrder,
   executeSearch,
   cancelSearch,
@@ -88,6 +91,8 @@ const {
   checkedBookIds,
   atFilters,
   filteredResults,
+  filteredVersion,
+  filteredCount,
   filteredGeneration,
   resultCounts,
   initCheckedBooks,
@@ -103,6 +108,7 @@ const {
   handleResultClick,
 } = useFullTextSearchFilters(
   () => results.value,
+  () => resultsVersion.value,
   () => executedQuery.value,
   matchedTermsOf,
   executeSearch,
@@ -147,6 +153,7 @@ const cardBarSlotId = `fts-card-bar-${String(tabId).replace(/[^\w-]/g, '_')}`
 const isOptionsActive = computed(
   () => maxWordDistance.value !== 10 || requireOrdered.value
      || WORD_OPTIONS.some((option) => allWords.value[option] !== (option === 'ketiv'))
+     || Object.values(perWord.value).some((words) => words?.length)
      || settings.searchContextMarginWords !== 30,
 )
 
@@ -187,19 +194,14 @@ useDropdownClose(
   { toggleButton: computed(() => searchBarRef.value?.optionsBtnRef ?? null) },
 )
 
-// A search on screen re-runs when an option changes (its results are stale), once per user
-// action: one panel click can change both a setting and the query's syntax.
-let rerunTerm: string | null = null
+// A search on screen re-runs when an option changes (its results are stale), once per user action.
 let rerunScheduled = false
-function scheduleRerun(term?: string) {
-  if (term !== undefined) rerunTerm = term
+function scheduleRerun() {
   if (rerunScheduled) return
   rerunScheduled = true
   void nextTick(() => {
     rerunScheduled = false
-    const next = rerunTerm ?? executedQuery.value
-    rerunTerm = null
-    if (hasSearched.value && executedQuery.value && next) handleSearch(next)
+    if (hasSearched.value && executedQuery.value) handleSearch(executedQuery.value)
   })
 }
 
@@ -208,16 +210,11 @@ watch(
     maxWordDistance,
     requireOrdered,
     allWords,
+    perWord,
     () => settings.searchContextMarginWords,
   ],
   () => scheduleRerun(),
 )
-
-// The per-word toggles rewrite the query's syntax; a search on screen re-runs with its term.
-function onPerWordQuery(query: string) {
-  searchQuery.value = query
-  scheduleRerun(parseSearchQuery(query).term)
-}
 
 // The index builds in the background; a search issued before the first segments
 // flush returns 'indexNotReady' and the results area shows that error until the
@@ -322,7 +319,9 @@ watch(
     // Consume it, like openTocLineIndex: the field describes ONE navigation, and leaving it
     // set would make an unrelated later patch (a title refresh) re-trigger this restore.
     paneNavigation.updateActiveTab({ searchRestore: undefined })
-    resultsListRef.value?.armRestore()
+    // The query this navigation shows — the term the list's `searchQuery` will carry.
+    const tabQuery = paneNavigation.tabs.find((t) => t.id === tabId)?.searchQuery ?? ''
+    resultsListRef.value?.armRestore(parseSearchQuery(tabQuery).term || tabQuery)
   },
 )
 
@@ -359,6 +358,7 @@ async function saveFilterState(keepScrollCleared = false) {
     // Persist the sort only when it's not the default — 'catalogOrder' is the
     // reset-on-new-search default, so there's nothing to remember for it.
     searchSortOrder: sortOrder.value !== 'catalogOrder' ? sortOrder.value : undefined,
+    searchPerWord: Object.keys(perWord.value).length ? perWord.value : undefined,
   }
   // Mirror the scroll scalars to localStorage FIRST — synchronous, so it lands even when
   // this runs during reload teardown and the async IDB write below never commits.
@@ -396,12 +396,14 @@ onMounted(async () => {
     initCheckedBooks()
   }
 
+  if (saved?.searchPerWord) perWord.value = saved.searchPerWord
+
   if (saved?.searchAtFilters?.length) {
     setAtFilters(saved.searchAtFilters)
   }
 
-  // Restore zoom BEFORE restoring scroll — zoom affects item height estimates in the
-  // virtualizer, so if zoom is applied after results populate the scroll lands in the wrong place.
+  // Restore zoom BEFORE restoring scroll — zoom changes the rows' heights, so a scroll
+  // restored before the zoom applies lands the list in the wrong place.
   if (saved?.searchZoom != null) {
     zoom.value = saved.searchZoom
   }
@@ -477,8 +479,8 @@ onBeforeUnmount(() => {
         ref="searchBarRef"
         v-model:search-query="searchQuery"
         :is-searching="isSearching"
-        :result-count="filteredResults.length"
-        :total-result-count="results.length"
+        :result-count="filteredCount"
+        :total-result-count="resultCount"
         :filter-count="checkedBookIds.size"
         :at-filter-count="atFilters.length"
         :is-options-open="isOptionsOpen"
@@ -499,12 +501,13 @@ onBeforeUnmount(() => {
         :require-ordered="requireOrdered"
         :context-words="settings.searchContextMarginWords"
         :all-words="allWords"
+        :per-word="perWord"
         :query="searchQuery"
         @update:max-word-distance="maxWordDistance = $event"
         @update:require-ordered="requireOrdered = $event"
         @update:context-words="settings.searchContextMarginWords = $event"
         @set-all-words="setAllWords"
-        @update:query="onPerWordQuery"
+        @update:per-word="perWord = $event"
         @close="isOptionsOpen = false"
       />
     </div>
@@ -519,12 +522,13 @@ onBeforeUnmount(() => {
           :require-ordered="requireOrdered"
           :context-words="settings.searchContextMarginWords"
           :all-words="allWords"
+          :per-word="perWord"
           :query="searchQuery"
-            @update:max-word-distance="maxWordDistance = $event"
+          @update:max-word-distance="maxWordDistance = $event"
           @update:require-ordered="requireOrdered = $event"
           @update:context-words="settings.searchContextMarginWords = $event"
           @set-all-words="setAllWords"
-          @update:query="onPerWordQuery"
+          @update:per-word="perWord = $event"
         />
       </PageCard>
       <div v-if="!showOptionsCard" class="results-list-wrap">
@@ -534,18 +538,18 @@ onBeforeUnmount(() => {
         <div class="search-stage-row" aria-live="polite">
           <template v-if="isSearching">
             {{ stageLabel }}
-            <span v-if="filteredResults.length" class="search-stage-count">{{ filteredResults.length.toLocaleString() }}</span>
+            <span v-if="filteredCount" class="search-stage-count">{{ filteredCount.toLocaleString() }}</span>
           </template>
-          <span v-else-if="results.length" dir="auto">
-            <span class="search-stage-count">{{ filteredResults.length.toLocaleString() }}<template v-if="filteredResults.length < results.length"> / {{ results.length.toLocaleString() }}</template></span>
+          <span v-else-if="resultCount" dir="auto">
+            <span class="search-stage-count">{{ filteredCount.toLocaleString() }}<template v-if="filteredCount < resultCount"> / {{ resultCount.toLocaleString() }}</template></span>
             {{ $t('fullTextSearch.results') }}
           </span>
         </div>
         <FullTextSearchResultsList
           ref="resultsListRef"
           :results="filteredResults"
+          :results-version="filteredVersion"
           :results-generation="filteredGeneration"
-          :total-results="results.length"
           :search-query="executedQuery"
           :is-searching="isSearching"
           :has-searched="hasSearched"

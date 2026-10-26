@@ -161,23 +161,7 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         /// </summary>
         public IEnumerable<(int Id, string Text)> ReadDocumentsInResultOrder(long skip, CancellationToken ct = default)
         {
-            var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
-
-            var lineCounts = new Dictionary<int, long>();
-            using (var count = _connection.CreateCommand())
-            {
-                count.CommandText = SeforimDbSqlStrings.FtsLineCountsByBook;
-                using var r = count.ExecuteReader();
-                while (r.Read()) lineCounts[r.GetInt32(0)] = r.GetInt64(1);
-            }
-
-            var bookOrder = new List<int>(lineCounts.Keys);
-            bookOrder.Sort((a, b) =>
-            {
-                bool hasA = treeOrder.TryGetValue(a, out int rankA), hasB = treeOrder.TryGetValue(b, out int rankB);
-                if (hasA != hasB) return hasA ? -1 : 1;
-                return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
-            });
+            var (bookOrder, lineCounts) = BooksInResultOrder();
 
             using var command = _connection.CreateCommand();
             command.CommandText = SeforimDbSqlStrings.FtsReadBookLines(_schema);
@@ -199,6 +183,52 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
             }
         }
 
+        /// <summary>
+        /// The books in result order with their line counts — THE definition of the index's
+        /// order, read by the build (<see cref="ReadDocumentsInResultOrder"/>) and by
+        /// <see cref="BookPositionRanges"/>, so the two can never disagree.
+        /// </summary>
+        private (List<int> BookOrder, Dictionary<int, long> LineCounts) BooksInResultOrder()
+        {
+            var treeOrder = SeforimDbBookTreeOrder.Load(_connection);
+
+            var lineCounts = new Dictionary<int, long>();
+            using (var count = _connection.CreateCommand())
+            {
+                count.CommandText = SeforimDbSqlStrings.FtsLineCountsByBook;
+                using var r = count.ExecuteReader();
+                while (r.Read()) lineCounts[r.GetInt32(0)] = r.GetInt64(1);
+            }
+
+            var bookOrder = new List<int>(lineCounts.Keys);
+            bookOrder.Sort((a, b) =>
+            {
+                bool hasA = treeOrder.TryGetValue(a, out int rankA), hasB = treeOrder.TryGetValue(b, out int rankB);
+                if (hasA != hasB) return hasA ? -1 : 1;
+                return hasA ? rankA.CompareTo(rankB) : a.CompareTo(b);
+            });
+            return (bookOrder, lineCounts);
+        }
+
+        /// <summary>
+        /// Each book's block of index positions: the build numbers lines 1, 2, 3… in result
+        /// order, a book's lines in reading order, so a book is the contiguous run
+        /// [First, First + Count - 1] and its line at lineIndex i is position First + i.
+        /// </summary>
+        public Dictionary<int, (long First, long Count)> BookPositionRanges()
+        {
+            var (bookOrder, lineCounts) = BooksInResultOrder();
+            var ranges = new Dictionary<int, (long First, long Count)>(bookOrder.Count);
+            long next = 1;
+            foreach (int bookId in bookOrder)
+            {
+                long count = lineCounts[bookId];
+                ranges[bookId] = (next, count);
+                next += count;
+            }
+            return ranges;
+        }
+
         public IEnumerable<(int Id, string Text)> ReadDocumentsAfter(int afterId, int limit = 0, CancellationToken ct = default)
         {
             using var command = _connection.CreateCommand();
@@ -214,13 +244,71 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
             }
         }
 
-        /// <summary>Search-result content without placement - the plain corpus seam. The
-        /// Title slot is left empty on purpose: Core enriches hits with their book ID instead
-        /// and never reads the engine's title. The engine's own diagnostics run over the test
-        /// corpus, which does fill it.</summary>
+        /// <summary>Search-result content without placement - the plain corpus seam, and the
+        /// searcher's verification fetch: id and text only, by primary key from the table that
+        /// holds the text (<see cref="SeforimDbSqlStrings.FtsFetchLines"/>). The Title slot is
+        /// left empty on purpose: Core enriches hits with their book ID instead and never reads
+        /// the engine's title. The engine's own diagnostics run over the test corpus, which
+        /// does fill it.</summary>
         public IEnumerable<(int Id, string Text, string Title)> FetchDocuments(IEnumerable<int> ids)
         {
-            foreach (var (id, text, _) in FetchPlacedDocuments(ids)) yield return (id, text, "");
+            var chunk = new List<int>(SqliteInListChunkSize);
+            using var command = _connection.CreateCommand();
+            string[] parameterNames = AddChunkParameters(command, SqliteInListChunkSize);
+
+            foreach (int id in ids)
+            {
+                chunk.Add(id);
+                if (chunk.Count == SqliteInListChunkSize)
+                {
+                    foreach (var row in FetchTextChunk(command, parameterNames, chunk)) yield return row;
+                    chunk.Clear();
+                }
+            }
+
+            if (chunk.Count > 0)
+                foreach (var row in FetchTextChunk(command, parameterNames, chunk)) yield return row;
+        }
+
+        private IEnumerable<(int Id, string Text, string Title)> FetchTextChunk(
+            SqliteCommand command, string[] parameterNames, List<int> ids)
+        {
+            command.CommandText = SeforimDbSqlStrings.FtsFetchLines(_schema, ids.Count);
+            for (int i = 0; i < ids.Count; i++)
+                command.Parameters[parameterNames[i]].Value = StoredId(ids[i]);
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                yield return (LocalId(reader.GetInt64(0)), _codec.DecodeColumnOrEmpty(reader, 1), "");
+        }
+
+        /// <summary>
+        /// The placement (book id, lineIndex, own TOC entry) of each line, no text - what the
+        /// searcher reads AFTER verification, for the hits that passed
+        /// (<see cref="SeforimDbSqlStrings.FtsFetchPlacements"/>). An id with no line is absent.
+        /// </summary>
+        public Dictionary<int, FtsDocumentPlacement> FetchPlacements(IReadOnlyList<int> ids)
+        {
+            var placements = new Dictionary<int, FtsDocumentPlacement>(ids?.Count ?? 0);
+            if (ids == null || ids.Count == 0) return placements;
+
+            using var command = _connection.CreateCommand();
+            string[] parameterNames = AddChunkParameters(command, SqliteInListChunkSize);
+            for (int start = 0; start < ids.Count; start += SqliteInListChunkSize)
+            {
+                int count = Math.Min(SqliteInListChunkSize, ids.Count - start);
+                command.CommandText = SeforimDbSqlStrings.FtsFetchPlacements(_schema, count);
+                for (int i = 0; i < count; i++)
+                    command.Parameters[parameterNames[i]].Value = StoredId(ids[start + i]);
+
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    placements[LocalId(reader.GetInt64(0))] = new FtsDocumentPlacement(
+                        bookId: reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                        lineIndex: reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                        tocEntryId: LocalTocId(reader.GetInt64(3)));
+            }
+            return placements;
         }
 
         /// <summary>Search-result content plus each line's placement (book id, lineIndex, own
