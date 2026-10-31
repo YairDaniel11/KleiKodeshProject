@@ -65,7 +65,7 @@ useDropdownClose(
   display: flex;
   flex-direction: column;
   width: fit-content;
-  /* Same surface as the book-view toolbar beside it. */
+  /* Same surface as the page toolbar beside it. */
   background: var(--bg-toolbar);
   overflow: hidden;
   --tree-bg: var(--bg-toolbar);
@@ -78,6 +78,9 @@ useDropdownClose(
 .side-panel-inline {
   height: 100%;
   flex-shrink: 0;
+  /* Default cap before the reader drags the sash: long titles wrap instead of widening the
+     panel without limit. A dragged width (useSidePanelLayout, 0.1..0.5) lifts it. */
+  max-width: 30%;
 }
 
 /* Overlay mode floats over the content with no sash beside it, so it needs its

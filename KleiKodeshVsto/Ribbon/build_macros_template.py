@@ -1,13 +1,18 @@
-"""Rebuilds the VBA macros inside Resources\\KleiKodeshMacros.dotm from VbaCommands.cs.
+"""Builds Resources\\KleiKodeshMacros.en.dotm from VbaCommands.cs.
 
-One macro per add-in command (English id and Hebrew label), so users can put any
-command on the Quick Access Toolbar or a keyboard shortcut. The installer copies the
-.dotm into Word's STARTUP folder.
+One macro per add-in command, so users can put any command on the Quick Access
+Toolbar or a keyboard shortcut. Macros are named by the English (ASCII) ids only:
+Hebrew names failed with "Sub or Function not defined" from shortcuts and the Macros
+dialog on machines whose non-Unicode language is not Hebrew (issue #266). The file
+keeps its .en name so existing installs stay valid. Never installed automatically:
+the user opts in in the installer's settings page or the add-in's settings pane
+(KleiKodesh.Helpers.VbaMacrosTemplate), which copies it into Word's STARTUP folder.
 
 A .dotm is a zip; the macros live in word/vbaProject.bin, a compound file (MS-CFB)
-holding MS-OVBA-compressed streams. This script reads the existing vbaProject.bin,
-replaces the KleiKodesh module source, drops the compiled p-code (Word recompiles
-from source on load) and writes the zip back. No Word, no VBA trust setting.
+holding MS-OVBA-compressed streams. This script reads vbaProject.bin from
+Ribbon\\macros_template_base.dotm (not shipped), replaces the KleiKodesh module
+source, drops the compiled p-code (Word recompiles from source on load) and writes
+the zip. No Word, no VBA trust setting.
 
     python KleiKodeshVsto\\Ribbon\\build_macros_template.py
 
@@ -21,7 +26,8 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOURCE = os.path.join(HERE, 'VbaCommands.cs')
-TARGET = os.path.join(HERE, '..', 'Resources', 'KleiKodeshMacros.dotm')
+BASE = os.path.join(HERE, 'macros_template_base.dotm')
+TARGET = os.path.join(HERE, '..', 'Resources', 'KleiKodeshMacros.en.dotm')
 MODULE = 'KleiKodesh'
 CODEPAGE = 'cp1255'   # VBA stores source in the ANSI code page; Hebrew names need 1255
 NOT_ACTIVE_HE = 'התוסף כלי קודש אינו פעיל'
@@ -50,8 +56,11 @@ def module_source():
              '    End If',
              'End Function']
     # "public void Nakdan() => AddinCommands.Run(...)" / "public void <Hebrew>() => Nakdan();"
-    # The Hebrew alias calls its English twin, so every macro calls an English member.
+    # The Hebrew aliases are skipped: VBA keeps names in the ANSI code page, so they only
+    # resolve where that is Hebrew. English ids are ASCII and the Hebrew labels are not.
     for name, twin in re.findall(r'public void (\w+)\(\) => (\w+)', code):
+        if not name.isascii():
+            continue
         member = name if twin == 'AddinCommands' else twin
         lines += ['', 'Public Sub %s()' % name, '    KleiKodeshAddin.%s' % member, 'End Sub']
     if len(lines) < 10:
@@ -307,7 +316,8 @@ def zero_module_offsets(dir_data):
 
 
 def main():
-    with zipfile.ZipFile(TARGET) as z:
+    target = TARGET
+    with zipfile.ZipFile(BASE) as z:
         parts = [(i, z.read(i.filename)) for i in z.infolist()]
     vba = read_cfb(dict(parts_by_name(parts))['word/vbaProject.bin'])
 
@@ -321,10 +331,30 @@ def main():
         new[name] = compress(source)
 
     bin_data = write_cfb(new)                           # build fully before touching the file
-    with zipfile.ZipFile(TARGET, 'w', zipfile.ZIP_DEFLATED) as z:
+    project = re.search(rb'Name="([^"]+)"', vba['PROJECT']).group(1).decode(CODEPAGE)
+    macros = re.findall(r'Public Sub (\w+)\(', module_source().decode(CODEPAGE))
+    built = {'word/vbaProject.bin': bin_data,
+             'word/vbaData.xml': vba_data_xml(dict(parts_by_name(parts))['word/vbaData.xml'], project, macros)}
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as z:
         for info, data in parts:
-            z.writestr(info, bin_data if info.filename == 'word/vbaProject.bin' else data)
-    print('Wrote %s' % os.path.normpath(TARGET))
+            z.writestr(info, built.get(info.filename, data))
+    print('Wrote %s' % os.path.normpath(target))
+
+
+def vba_data_xml(base_xml, project, macros):
+    """word/vbaData.xml lists every macro as <project>.<module>.<macro>, and Word binds
+    keyboard shortcuts to exactly that name. The base file was made from Normal.dotm, so
+    its list said NORMAL.KLEIKODESH.* and every shortcut failed with "Sub or Function
+    not defined" (issue #331). Rebuild the list from the macros actually written."""
+    entries = ''.join(
+        '<wne:mcd wne:macroName="%s" wne:name="%s" wne:bEncrypt="00" wne:cmg="56"/>'
+        % (('%s.%s.%s' % (project, MODULE, m)).upper(), '%s.%s.%s' % (project, MODULE, m))
+        for m in macros)
+    xml = base_xml.decode('utf-8')
+    xml, n = re.subn(r'<wne:mcds>.*?</wne:mcds>', lambda _: '<wne:mcds>%s</wne:mcds>' % entries, xml, flags=re.S)
+    if n != 1:
+        raise SystemExit('No <wne:mcds> list in the base vbaData.xml')
+    return xml.encode('utf-8')
 
 
 def parts_by_name(parts):

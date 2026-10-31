@@ -7,11 +7,12 @@ import { useBookViewStore } from '@/stores/bookViewStore'
 import { useBooksDataStore } from '@/stores/booksDataStore'
 import { showToast } from '@/composables/useToast'
 import { isExportRestricted } from './exportRestriction'
+import type { BookBookmark } from '@/stores/bookBookmarks'
 import BookViewToolbar from './BookViewToolbar.vue'
 import SplitPane from '@/components/SplitPane.vue'
 import BookViewLinesContent from './lines/BookViewLinesContent.vue'
-import BookViewSearchBar from './BookViewSearchBar.vue'
-import BookViewSidePanel from './BookViewSidePanel.vue'
+import BookViewSearchBar from '@/components/ReadingSearchBar.vue'
+import SidePanel from '@/components/SidePanel.vue'
 import BookViewTocTree from './toc/BookViewTocTree.vue'
 import CommentaryTreePanel from './commentary/CommentaryTreePanel.vue'
 import CommentaryPanelHost from './commentary/CommentaryPanelHost.vue'
@@ -19,6 +20,8 @@ import BookViewHebrewBooksSideEdition from './BookViewHebrewBooksSideEdition.vue
 import { useHebrewBooksSideEditionMode } from './useHebrewBooksSideEditionMode'
 import { useHebrewBooksSideEditionStore } from '@/stores/hebrewBooksSideEditionStore'
 import { usePaneNavigation } from '@/composables/usePaneNavigation'
+import { cancelWordExport } from '@/webview-host/bridge'
+import { useSidePanelLayout } from '@/composables/useSidePanelLayout'
 import { slotForSearchMode, isSideCommentarySlot, SIDE_COMMENTARY_SLOTS } from './bookViewTypes'
 import type { CommentarySlot, SideEditionPersistState } from './bookViewTypes'
 import { useI18n } from 'vue-i18n'
@@ -49,8 +52,16 @@ useResizeObserver(bookViewRoot, ([entry]) => { shellWidth.value = entry!.content
 const isWideScreen = computed(() => shellWidth.value >= 650)
 /** Share of the split row the book text keeps when both side columns are open. */
 const MIN_LINES_FRACTION = 0.2
-const isSidePanelWideScreen = computed(() => shellWidth.value >= 520)
-const sidePanelIsOverlay = computed(() => !isSidePanelWideScreen.value)
+// The TOC / filter side panel: inline with a sash on a wide page, overlay on a narrow one
+// (shared with the FastDocView page). sidePanelResizeArea wraps panel + sash + content-area.
+const sidePanelResizeArea = ref<HTMLElement | null>(null)
+const {
+  isOverlay: sidePanelIsOverlay,
+  panelStyle: sidePanelStyle,
+  onDividerPointerDown: onSidePanelDividerPointerDown,
+  onResizePointerMove: onSidePanelResizePointerMove,
+  onResizePointerUp: onSidePanelResizePointerUp,
+} = useSidePanelLayout({ pageElement: bookViewRoot, resizeArea: sidePanelResizeArea })
 
 const {
   toolbarPosition, toolbarVisible,
@@ -61,11 +72,11 @@ const {
   tocVisible,
   sidePanelVisible, sidePanelToggleButtonEl,
   panels, anyCommentaryVisible, openCommentarySlots, commentaryPersistState, tocPersistState,
-  tabId, bookId, lines, ensureLines, lineCharacterCounts, hasCommentaries, hasRelatedBooks, hasToc,
+  tabId, bookId, lines, linesRevision, ensureLines, ensureAllLines, lineCharacterCounts, hasCommentaries, hasRelatedBooks, hasToc,
   bookHasTeamim,
   versions, activeVersionId, selectVersion, versionPersistState,
   hebrewBooksEditions,
-  filterGroups, staticFilterGroups, commentaryLoading, commentaryLoadError, requestContentPriority,
+  filterGroups, staticFilterGroups, commentaryLoading, commentaryLoadError, ensureLineContents, trimLineContents,
   tocEntries, tocSearchTree, selectedAltTocSection, tocLoading, tocError,
   altTocLabelMap, selectedSectionLineIds, manualSelectionLineIds,
   getHighlightsForLine, applyHighlight, clearHighlight,
@@ -128,12 +139,30 @@ const commentarySharedProps = computed(() => ({
   prepareExportData: prepareCommentaryExportData,
   prepareExportTargets: prepareCommentaryExportTargets,
   resolveWordLinkTarget: resolveCommentaryWordLinkTarget,
-  requestContentPriority,
+  ensureLineContents,
+  trimLineContents,
   createNote,
   updateNote,
   deleteNote,
   commentaryTocPaths: commentaryTocPaths.value,
 }))
+
+/** A new bookmark's default name: the TOC path of the section the line sits in. */
+function bookmarkLabelForLine(lineIndex: number): string {
+  const entry = getActiveTocEntry(lineIndex)
+  return entry ? getTocPath(entry) : ''
+}
+
+/** Lands the bookmark's exact point - and reselects its text when it was made from a selection. */
+function goToBookmark(bookmark: BookBookmark) {
+  void linesContentRef.value?.scrollToBookmarkPoint(
+    bookmark.lineId, bookmark.lineIndex, bookmark.letterOffset ?? 0, bookmark.selectionLetterCount ?? 0)
+}
+
+/** The lines' context menu: the toolbar's bookmarks dropdown opens on the new bookmark. */
+function createBookmark() {
+  void toolbarRef.value?.createBookmark()
+}
 
 // All toolbar props that do not depend on its position, so the three placements
 // (top / side / bottom) each spread one object instead of repeating the list.
@@ -155,6 +184,8 @@ const toolbarProps = computed(() => ({
   currentScrollLineIndex: currentScrollLineIndex.value,
   lines: lines.value,
   onRelatedBooksOpen: ensureStaticFilterGroupsLoaded,
+  bookmarkLabelForLine,
+  readBookmarkPoint: () => linesContentRef.value?.readBookmarkPoint() ?? null,
   bottomCommentaryVisible: panels.bottom.visible.value,
   sideCommentaryVisible: sideCommentaryOpen.value,
   sideLeftCommentaryVisible: sideLeftCommentaryOpen.value,
@@ -273,25 +304,7 @@ function onSplitPointerUp() {
 }
 
 // ── Divider drag: TOC / filter side panel ────────────────────────────────────
-// sidePanelResizeArea wraps the side panel + divider + content-area so we can
-// measure the total available width for fraction calculations.
-const sidePanelResizeArea = ref<HTMLElement | null>(null)
-const isSidePanelDragging = ref(false)
-const sidePanelFraction = ref<number | null>(null)
-
-function onSidePanelDividerPointerDown(e: PointerEvent) {
-  isSidePanelDragging.value = true
-  ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
-}
-function onSidePanelResizePointerMove(e: PointerEvent) {
-  if (!isSidePanelDragging.value || !sidePanelResizeArea.value) return
-  const rect = sidePanelResizeArea.value.getBoundingClientRect()
-  // Panel is on the physical right (RTL: inline-start = right), measure from right edge
-  sidePanelFraction.value = Math.min(0.5, Math.max(0.1, (rect.right - e.clientX) / rect.width))
-}
-function onSidePanelResizePointerUp() {
-  isSidePanelDragging.value = false
-}
+// (useSidePanelLayout above: drag, fraction 0.1..0.5, overlay below 520 px.)
 
 // ── Panel toggles ────────────────────────────────────────────────────────────
 
@@ -320,13 +333,31 @@ async function onExportToWord() {
     showToast(EXPORT_RESTRICTED_MESSAGE, { variant: 'error' })
     return
   }
-  if (exportingToWord.value) return
+  // A cancelled export may still be finishing (a paste Word already began): one at a time.
+  if (exportingToWord.value || exportInFlight) return
   exportingToWord.value = true
+  exportInFlight = true
+  const generation = ++exportGeneration
+  // One id for the whole export: the paste, or its fallback to a file for a large book.
+  exportRequestId = crypto.randomUUID()
   try {
-    await linesContentRef.value?.pasteAllIntoWord()
+    await linesContentRef.value?.pasteAllIntoWord(exportRequestId, () => generation !== exportGeneration)
   } finally {
-    exportingToWord.value = false
+    exportInFlight = false
+    if (generation === exportGeneration) exportingToWord.value = false
   }
+}
+/** Bumped by a cancel: the export that was running no longer drives the button. */
+let exportGeneration = 0
+let exportRequestId: string | null = null
+let exportInFlight = false
+/** The animated X: cancels the running export (paste or file) - the service / host ends only a
+ *  Word instance that export started - and the pending call resolves as cancelled. */
+function onCancelExportToWord() {
+  exportGeneration++
+  exportingToWord.value = false
+  if (exportRequestId) void cancelWordExport(exportRequestId)
+  exportRequestId = null
 }
 
 // Opening or closing EITHER side commentary column re-wraps the text, so the lines
@@ -463,7 +494,9 @@ function getSideEditionOutlineTarget(): string | undefined {
       @toggle-search="toggleSearch"
       @toggle-toc="toggleTocPanel"
       @export-to-word="onExportToWord"
+      @cancel-export-to-word="onCancelExportToWord"
       @navigate-to-next-section="navigateToAdjacentTocSection('next')"
+      @go-to-bookmark="goToBookmark"
       @navigate-to-previous-section="navigateToAdjacentTocSection('previous')"
       @select-version="selectVersion"
     />
@@ -481,7 +514,9 @@ function getSideEditionOutlineTarget(): string | undefined {
         @toggle-search="toggleSearch"
         @toggle-toc="toggleTocPanel"
         @export-to-word="onExportToWord"
+        @cancel-export-to-word="onCancelExportToWord"
         @navigate-to-next-section="navigateToAdjacentTocSection('next')"
+        @go-to-bookmark="goToBookmark"
         @navigate-to-previous-section="navigateToAdjacentTocSection('previous')"
         @select-version="selectVersion"
       />
@@ -502,10 +537,10 @@ function getSideEditionOutlineTarget(): string | undefined {
           RTL: first child in a flex row = physical right, so the panel appears on the right.
         -->
         <template v-if="sidePanelVisible && !sidePanelIsOverlay">
-          <BookViewSidePanel
+          <SidePanel
             :toggle-button-el="sidePanelToggleButtonEl"
             :is-overlay="false"
-            :style="sidePanelFraction !== null ? { width: `${sidePanelFraction * 100}%` } : undefined"
+            :style="sidePanelStyle"
             @close="closeSidePanel"
           >
             <BookViewTocTree
@@ -520,7 +555,7 @@ function getSideEditionOutlineTarget(): string | undefined {
               @select="onTocSelect"
               @alt-select="onAltTocSelect"
             />
-          </BookViewSidePanel>
+          </SidePanel>
           <div class="sash sash-v" @pointerdown="onSidePanelDividerPointerDown" />
         </template>
 
@@ -562,8 +597,11 @@ function getSideEditionOutlineTarget(): string | undefined {
                     v-if="scrollStateReady"
                     :key="sideColumnsKey"
                     ref="linesContentRef"
+                    @create-bookmark="createBookmark"
                     :lines="lines"
+                    :lines-revision="linesRevision"
                     :ensure-lines="ensureLines"
+                    :ensure-all-lines="ensureAllLines"
                     :line-character-counts="lineCharacterCounts"
                     :alt-toc-label-map="altTocLabelMap"
                     :selected-line-id="selectedLineId"
@@ -664,7 +702,7 @@ function getSideEditionOutlineTarget(): string | undefined {
           />
 
           <!-- Overlay side panel: only rendered when screen is too narrow for inline mode -->
-          <BookViewSidePanel
+          <SidePanel
             v-if="sidePanelVisible && sidePanelIsOverlay"
             :toggle-button-el="sidePanelToggleButtonEl"
             :is-overlay="true"
@@ -682,7 +720,7 @@ function getSideEditionOutlineTarget(): string | undefined {
               @select="onTocSelect"
               @alt-select="onAltTocSelect"
             />
-          </BookViewSidePanel>
+          </SidePanel>
 
           <!--
             The bottom panel's filter dropdown. Same behaviour as a side panel's,
@@ -721,7 +759,9 @@ function getSideEditionOutlineTarget(): string | undefined {
       @toggle-search="toggleSearch"
       @toggle-toc="toggleTocPanel"
       @export-to-word="onExportToWord"
+      @cancel-export-to-word="onCancelExportToWord"
       @navigate-to-next-section="navigateToAdjacentTocSection('next')"
+      @go-to-bookmark="goToBookmark"
       @navigate-to-previous-section="navigateToAdjacentTocSection('previous')"
       @select-version="selectVersion"
     />

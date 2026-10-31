@@ -5,6 +5,7 @@ import {
   idbTabsDeleteByPrefix,
 } from '@/utils/persistence'
 import { useWorkspaceStore } from './workspaceStore'
+import { useSearchCacheStore } from './searchCacheStore'
 
 /**
  * Key layout for the `app-tabs` IndexedDB database — the record shape of this slice,
@@ -27,6 +28,15 @@ export interface TabState {
   searchPerWord?: import('@/features/full-text-search/queryWordSyntax').PerWord // per-tab per-word option choices
   htmlViewScrollTop?: number      // scroll position (px) for /html-view tabs (HTML and TXT files)
   txtViewZoom?: number            // per-tab zoom level for /txt-view tabs (50–400)
+  fastDocViewZoom?: number        // per-tab zoom level for /fast-doc-view tabs
+  fastDocViewBlockIndex?: number  // first visible block of a /fast-doc-view tab (position restore)
+  fastDocViewBlockOffset?: number // pixels the viewport sits below that block's top
+  fastDocViewNotesVisible?: boolean // the notes pane open / closed (like the bottom commentary)
+  fastDocViewNotesSync?: boolean // the notes pane follows the text (FastDocView default: on)
+  fastDocViewNotesPlace?: 'bottom' | 'right' | 'left' // the notes pane's place (toolbar toggle; sides on a wide page)
+  fastDocViewNotesFractions?: Partial<Record<'bottom' | 'right' | 'left', number>> // the text pane's share per place
+  fastDocViewTocVisible?: boolean   // the TOC panel open (book view: TocPersistState.visible)
+  fastDocViewToc?: { searchQuery?: string; expanded?: number[]; scrollTop?: number } // TOC search, expanded headings, scroll
 }
 
 export interface BookState {
@@ -77,6 +87,11 @@ function workspaceId(): string {
 // `recentLocations` as the tab navigated away or closed.
 
 const bookStateCache = new Map<string, BookState | null>()
+
+/** The search cache pins the entry each open tab shows under this owner (see searchCacheStore). */
+export function searchCachePinOwner(tabId: string): string {
+  return `${workspaceId()}:${tabId}`
+}
 
 /**
  * Cache-key builders. Kept beside each other deliberately: the entry key and the
@@ -167,6 +182,7 @@ export function clearBookViewState(tabId: string, bookId: number): Promise<void>
  */
 export function deleteAllStateForTab(tabId: string): void {
   const wsId = workspaceId()
+  useSearchCacheStore().unpin(searchCachePinOwner(tabId)).catch(() => {/* non-fatal */})
   idbTabsDelete(KEYS.tab(wsId, tabId))
   idbTabsDeleteByPrefix(KEYS.tabPrefix(wsId, tabId))
   tabStateCache.delete(KEYS.tab(wsId, tabId))

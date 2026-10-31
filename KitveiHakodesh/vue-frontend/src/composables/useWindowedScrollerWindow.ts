@@ -106,7 +106,16 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
   // ── Anchor ────────────────────────────────────────────────────────────────────
 
   /** The first visible row, where it was within the content, and where the viewport was, as of the last look. */
-  let anchor: { index: number; offsetTop: number; scrollTop: number } | null = null
+  let anchor: { index: number; offsetTop: number; offsetHeight: number; scrollTop: number } | null = null
+
+  /**
+   * The row's top in content coordinates, measured (fractional). offsetTop is rounded:
+   * holding an anchor in rounded offsets drifted a pixel whenever the rows above had
+   * fractional heights, and the row above showed as a 1 px sliver at the top.
+   */
+  function measuredTop(viewport: HTMLElement, row: HTMLElement): number {
+    return row.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop
+  }
 
   /**
    * The reader's row is wherever the viewport is now. Call before the DOM changes.
@@ -120,7 +129,80 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
     if (!viewport) return
     const index = findRowIndexAt(viewport.scrollTop, false)
     const row = index != null ? options.rowElement(index) : null
-    if (row && index != null) anchor = { index, offsetTop: row.offsetTop, scrollTop: viewport.scrollTop }
+    if (row && index != null) {
+      // The scroll our own hold set is not the reader moving: keep the same words
+      // anchored, or each hold would hand the anchor to whichever character the
+      // re-wrap left at the top, and the reader's words would walk a line per step.
+      const isOwnHold = viewport.scrollTop === heldScrollTop && textAnchor != null && row.contains(textAnchor.node)
+      anchor = { index, offsetTop: measuredTop(viewport, row), offsetHeight: row.offsetHeight, scrollTop: viewport.scrollTop }
+      if (!isOwnHold) textAnchor = findTextAnchor(viewport, row)
+    }
+  }
+
+  // ── Text anchor ───────────────────────────────────────────────────────────────
+  //
+  // The character at the top of the viewport, and how far below the viewport's top
+  // it sat. A reflow (zoom, width) re-wraps the row; holding that character's line
+  // in place keeps the very words the reader was on, where a row fraction drifts.
+
+  let textAnchor: { node: Text; offset: number; top: number } | null = null
+  /** The scrollTop the last hold left, so the scroll event it causes is recognised as ours. */
+  let heldScrollTop: number | null = null
+
+  function caretAt(x: number, y: number): { node: Node; offset: number } | null {
+    const doc = document as Document & {
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+    }
+    if (doc.caretPositionFromPoint) {
+      const position = doc.caretPositionFromPoint(x, y)
+      return position ? { node: position.offsetNode, offset: position.offset } : null
+    }
+    const range = document.caretRangeFromPoint?.(x, y)
+    return range ? { node: range.startContainer, offset: range.startOffset } : null
+  }
+
+  function textTop(node: Text, offset: number): number | null {
+    if (!node.isConnected || node.length === 0) return null
+    const start = Math.min(offset, node.length - 1)
+    const range = document.createRange()
+    range.setStart(node, start)
+    range.setEnd(node, start + 1)
+    const rect = range.getClientRects()[0] ?? range.getBoundingClientRect()
+    return rect && (rect.height > 0 || rect.width > 0) ? rect.top : null
+  }
+
+  /** The first text line that starts inside the viewport — one the reader can see, not one cut off above. */
+  function findTextAnchor(viewport: HTMLElement, row: HTMLElement) {
+    const box = viewport.getBoundingClientRect()
+    const rowBox = row.getBoundingClientRect()
+    const bottom = Math.min(box.bottom, rowBox.bottom)
+    let y = Math.max(box.top, rowBox.top) + 2
+    for (let probe = 0; probe < 2 && y < bottom; probe++) {
+      const caret = caretAt(box.left + box.width / 2, y)
+      if (!caret || caret.node.nodeType !== Node.TEXT_NODE || !row.contains(caret.node)) return null
+      const node = caret.node as Text
+      const top = textTop(node, caret.offset)
+      if (top == null) return null
+      if (top >= box.top) return { node, offset: caret.offset, top: top - box.top }
+      // A line cut off at the top: try the line below it.
+      const range = document.createRange()
+      range.setStart(node, Math.min(caret.offset, node.length - 1))
+      range.setEnd(node, Math.min(caret.offset, node.length - 1) + 1)
+      y = range.getBoundingClientRect().bottom + 2
+    }
+    return null
+  }
+
+  /** Puts the anchored character back at its distance below the viewport's top. True when it could. */
+  function holdTextAnchor(viewport: HTMLElement, row: HTMLElement): boolean {
+    const text = textAnchor
+    if (!text || !row.contains(text.node)) return false
+    const top = textTop(text.node, text.offset)
+    if (top == null) return false
+    const delta = Math.round(top - viewport.getBoundingClientRect().top - text.top)
+    if (delta !== 0) viewport.scrollTop += delta
+    heldScrollTop = viewport.scrollTop
+    return true
   }
 
   /**
@@ -130,18 +212,35 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
    * extension that trims more above than it adds below leaves the content shorter
    * for a moment, and the browser clamps the scroll during that layout; a relative
    * correction would then stack on top of the clamp and land a screen early.
+   *
+   * The distance into the row is kept as a FRACTION of its height: when the row
+   * re-wraps (a zoom, a width change) a fixed pixel offset would point at other
+   * text, and a tall row would visibly slide under the reader.
    */
   function holdAnchor() {
     const viewport = options.viewport()
     if (!viewport || !anchor) return
     const row = options.rowElement(anchor.index)
     if (!row) return
-    const expected = row.offsetTop + (anchor.scrollTop - anchor.offsetTop)
-    if (viewport.scrollTop !== expected) {
-      viewport.scrollTop = expected
-      anchor.offsetTop = row.offsetTop
+    const height = row.offsetHeight
+    // A re-wrapped row: hold the reader's words, not a pixel offset into the row.
+    if (height !== anchor.offsetHeight && holdTextAnchor(viewport, row)) {
+      anchor.offsetTop = measuredTop(viewport, row)
+      anchor.offsetHeight = height
       anchor.scrollTop = viewport.scrollTop
+      return
     }
+    const offsetInto = anchor.scrollTop - anchor.offsetTop
+    const scaled = anchor.offsetHeight > 0 && height !== anchor.offsetHeight
+      ? Math.round(offsetInto * (height / anchor.offsetHeight))
+      : offsetInto
+    const top = measuredTop(viewport, row)
+    const expected = Math.max(0, Math.round(top + scaled))
+    if (viewport.scrollTop !== expected) viewport.scrollTop = expected
+    heldScrollTop = viewport.scrollTop
+    anchor.offsetTop = measuredTop(viewport, row)
+    anchor.offsetHeight = height
+    anchor.scrollTop = viewport.scrollTop
   }
 
   /**
@@ -155,7 +254,7 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
     if (!viewport || !anchor) return
     const row = options.rowElement(anchor.index)
     if (!row) return
-    const delta = row.offsetTop - anchor.offsetTop
+    const delta = Math.round(measuredTop(viewport, row) - anchor.offsetTop)
     if (delta !== 0) viewport.scrollTop += delta
   }
 
@@ -205,17 +304,27 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
     const wantEnd = Math.min(count, target + ROWS_BELOW_ON_REBUILD)
     if (!isRowInWindow(target) || !options.rowElement(target)) {
       const start = Math.max(0, target - ROWS_ABOVE_ON_REBUILD)
+      // Fetching the rows can shrink the count (a list whose length was an estimate
+      // until its rows were read): a target now past the end lands on the new last
+      // row instead of mounting an empty window beyond it — a blank screen.
+      let isTargetPastEnd = false
       const applied = await prepareWindow(generation, start, wantEnd, () => {
+        if (target >= options.count()) { isTargetPastEnd = true; return }
         // Nothing to hold through the rebuild: the view is leaving wherever it was.
         anchor = null
         windowStart.value = start
-        windowEnd.value = wantEnd
+        windowEnd.value = Math.min(wantEnd, options.count())
       })
+      if (isTargetPastEnd) return landAt(options.count() - 1, { align: landing.align ?? 'end' })
       if (!applied) return
     } else if (windowEnd.value < wantEnd) {
+      let isTargetPastEnd = false
       const applied = await prepareWindow(generation, windowEnd.value, wantEnd, () => {
-        windowEnd.value = wantEnd
+        if (target >= options.count()) { isTargetPastEnd = true; clampToCount(); return }
+        windowEnd.value = Math.min(wantEnd, options.count())
+        clampToCount()
       })
+      if (isTargetPastEnd) return landAt(options.count() - 1, { align: landing.align ?? 'end' })
       if (!applied) return
     }
     const viewport = options.viewport()
@@ -228,10 +337,14 @@ export function useWindowedScrollerWindow(options: WindowedScrollerWindowOptions
     const offset = requested > 0 && requested >= row.offsetHeight ? 0 : requested
     // offsetHeight is rounded down; a row of fractional height would be clipped by
     // that fraction at the bottom, so the end landing rounds the other way.
+    // offsetTop is rounded too, and rows of fractional height put the target's real
+    // top up to a pixel below it: the row above then showed as a 1 px sliver at the
+    // top (read as "first visible"). Land on the measured top, to the nearest pixel.
+    const viewportTop = viewport.getBoundingClientRect().top
     viewport.scrollTop =
       landing.align === 'end'
-        ? Math.ceil(row.getBoundingClientRect().bottom - viewport.getBoundingClientRect().top + viewport.scrollTop - viewport.clientHeight + offset)
-        : Math.max(0, row.offsetTop + offset)
+        ? Math.ceil(row.getBoundingClientRect().bottom - viewportTop + viewport.scrollTop - viewport.clientHeight + offset)
+        : Math.max(0, Math.round(row.getBoundingClientRect().top - viewportTop + viewport.scrollTop + offset))
     rememberAnchor()
     fill()
   }

@@ -169,6 +169,31 @@ namespace KitveiHakodesh.Core.SeforimDb
             return counts.ToArray();
         }
 
+        /// <summary>
+        /// The ids of the lines in [fromIndex, toIndex), placed by lineIndex (0 where a
+        /// lineIndex has no row), with no text. A TOC section's commentary needs its line
+        /// ids only; reading the section's text for them cost a whole section per click.
+        /// </summary>
+        public int[] GetLineIds(int bookId, int fromIndex, int toIndex)
+        {
+            if (toIndex <= fromIndex) return Array.Empty<int>();
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = SeforimDbSqlStrings.GetLineIds;
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            cmd.Parameters.AddWithValue("@fromIndex", fromIndex);
+            cmd.Parameters.AddWithValue("@toIndex", toIndex);
+            using var r = cmd.ExecuteReader();
+            var ids = new int[toIndex - fromIndex];
+            while (r.Read())
+            {
+                if (r.IsDBNull(0)) continue;
+                int slot = r.GetInt32(0) - fromIndex;
+                if (slot >= 0 && slot < ids.Length) ids[slot] = r.GetInt32(1);
+            }
+            return ids;
+        }
+
         /// <param name="versionId">0 for the book's own text; a book_version id to read the
         /// page through that version's overlay instead. See
         /// <see cref="SeforimDbSqlStrings.GetVersionLinesPaged"/> for what an overlay does and
@@ -201,6 +226,66 @@ namespace KitveiHakodesh.Core.SeforimDb
                 });
             }
             return list;
+        }
+
+        /// <summary>
+        /// Hands each line of [firstLineIndex, lastLineIndex] (through a version's overlay when
+        /// versionId > 0) to <paramref name="onLine"/> as it is read — nothing is collected, so
+        /// a scan over a whole book holds one line at a time.
+        /// </summary>
+        public void ForEachLineInIndexRange(int bookId, int firstLineIndex, int lastLineIndex, int versionId, Action<int, int, string> onLine)
+        {
+            using var conn = Open();
+            using var codec = CodecFor(conn);
+            using var cmd = conn.CreateCommand();
+            var schema = SchemaOf(conn);
+            bool isVersionRead = versionId > 0;
+            cmd.CommandText = isVersionRead
+                ? SeforimDbSqlStrings.GetVersionLinesInIndexRange(schema)
+                : SeforimDbSqlStrings.GetLinesInIndexRange(schema);
+            if (isVersionRead) cmd.Parameters.AddWithValue("@versionId", versionId);
+            cmd.Parameters.AddWithValue("@bookId", bookId);
+            cmd.Parameters.AddWithValue("@from", firstLineIndex);
+            cmd.Parameters.AddWithValue("@to", lastLineIndex);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                string content = isVersionRead ? ReadVersionLineContent(r, codec) : codec.DecodeColumnOrEmpty(r, 2);
+                onLine(r.GetInt32(0), r.IsDBNull(1) ? 0 : r.GetInt32(1), content);
+            }
+        }
+
+        /// <summary>
+        /// Like <see cref="ForEachLineInIndexRange"/> for a sparse set of line indexes — read in
+        /// batches of at most 900 (SQLite's bound-parameter limit), each in reading order.
+        /// </summary>
+        public void ForEachLineByIndexes(int bookId, IReadOnlyList<int> lineIndexes, int versionId, Action<int, int, string> onLine)
+        {
+            const int Batch = 900;
+            using var conn = Open();
+            using var codec = CodecFor(conn);
+            var schema = SchemaOf(conn);
+            bool isVersionRead = versionId > 0;
+            for (int at = 0; at < lineIndexes.Count; at += Batch)
+            {
+                int n = Math.Min(Batch, lineIndexes.Count - at);
+                var names = new string[n];
+                for (int i = 0; i < n; i++) names[i] = "@i" + i;
+                string list = string.Join(",", names);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = isVersionRead
+                    ? SeforimDbSqlStrings.GetVersionLinesByIndexList(schema, list)
+                    : SeforimDbSqlStrings.GetLinesByIndexList(schema, list);
+                if (isVersionRead) cmd.Parameters.AddWithValue("@versionId", versionId);
+                cmd.Parameters.AddWithValue("@bookId", bookId);
+                for (int i = 0; i < n; i++) cmd.Parameters.AddWithValue(names[i], lineIndexes[at + i]);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    string content = isVersionRead ? ReadVersionLineContent(r, codec) : codec.DecodeColumnOrEmpty(r, 2);
+                    onLine(r.GetInt32(0), r.IsDBNull(1) ? 0 : r.GetInt32(1), content);
+                }
+            }
         }
 
         /// <summary>
@@ -379,6 +464,46 @@ namespace KitveiHakodesh.Core.SeforimDb
                     LineIndex = r.IsDBNull(3) ? 0 : r.GetInt32(3),
                 });
             }
+            return list;
+        }
+
+        /// <summary>The same links as GetCommentaryLinksForSourceLineRange, de-duplicated and
+        /// grouped per (target book, connection type) — see CommentaryLinkGroupRow.</summary>
+        public List<CommentaryLinkGroupRow> GetCommentaryLinkGroupsForSourceLineRange(List<int> lineIds)
+        {
+            var list = new List<CommentaryLinkGroupRow>();
+            if (lineIds is null || lineIds.Count == 0) return list;
+            using var conn = Open();
+            _linkHasTargetLineIndex ??= ColumnExists(conn, "link", "targetLineIndex");
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = SeforimDbSqlStrings.GetCommentaryLinkGroupsForSourceLineRange(lineIds.Count, _linkHasTargetLineIndex.Value);
+            BindList(cmd, "p", lineIds);
+            using var r = cmd.ExecuteReader();
+            int curBook = int.MinValue, curType = int.MinValue;
+            var ids = new List<int>();
+            var indexes = new List<int>();
+            void Flush()
+            {
+                if (ids.Count == 0) return;
+                list.Add(new CommentaryLinkGroupRow
+                {
+                    TargetBookId = curBook,
+                    ConnectionTypeId = curType,
+                    LineIds = ids.ToArray(),
+                    LineIndexes = indexes.ToArray(),
+                });
+                ids.Clear();
+                indexes.Clear();
+            }
+            while (r.Read())
+            {
+                int book = r.IsDBNull(0) ? 0 : r.GetInt32(0);
+                int type = r.IsDBNull(1) ? 0 : r.GetInt32(1);
+                if (book != curBook || type != curType) { Flush(); curBook = book; curType = type; }
+                ids.Add(r.IsDBNull(2) ? 0 : r.GetInt32(2));
+                indexes.Add(r.IsDBNull(3) ? 0 : r.GetInt32(3));
+            }
+            Flush();
             return list;
         }
 

@@ -243,6 +243,7 @@
 /* Text-bearing surfaces opt back in. .word-link-tooltip is Teleported to body, so
    it sits outside every other selector here and needs its own entry. */
 .lines-content *, .commentary-view *, .word-page *, .txt-content *,
+.fast-doc-view-content *, .fast-doc-view-notes-pane *,
 .word-link-tooltip, .word-link-tooltip * { user-select: text; }
 
 /* Word-link point markers (superscript letter marks spliced by wordLinkAnchors.ts).
@@ -583,4 +584,13 @@ h1::after {
    container follow the UI direction, not the content's. */
 :root[dir='ltr'] .ui-chrome {
   direction: ltr;
+}
+
+/* English UI: what's typed into any text box is usually Hebrew - let the typed text pick its
+   own direction (Hebrew runs RTL, an English placeholder stays LTR). */
+:root[dir='ltr'] input[type='search'],
+:root[dir='ltr'] input[type='text'],
+:root[dir='ltr'] input:not([type]),
+:root[dir='ltr'] textarea {
+  unicode-bidi: plaintext;
 }

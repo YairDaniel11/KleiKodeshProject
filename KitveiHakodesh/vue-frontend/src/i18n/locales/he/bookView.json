@@ -86,6 +86,13 @@
     "placeholder": "הזן הערה...",
     "updated": "עודכן {time}"
   },
+  "bookmarks": {
+    "add": "צור סימניה",
+    "delete": "מחק סימניה",
+    "empty": "אין סימניות בספר זה",
+    "rename": "שנה שם סימניה",
+    "title": "סימניות"
+  },
   "related": {
     "commentariesOf": "מפרשי {title}",
     "empty": "אין ספרים קרובים",
@@ -159,7 +166,8 @@
     "syncOnTitle": "סנכרן מפרשים\nלחץ לכיבוי הסנכרון האוטומטי",
     "toc": "תוכן עניינים (Ctrl+K)",
     "zoomInTitle": "הגדל (Ctrl+)\nטקסט: {text}% {'|'} מפרשים: {commentary}\nאיפוס: Ctrl+0",
-    "zoomOutTitle": "הקטן (Ctrl-)\nטקסט: {text}% {'|'} מפרשים: {commentary}\nאיפוס: Ctrl+0"
+    "zoomOutTitle": "הקטן (Ctrl-)\nטקסט: {text}% {'|'} מפרשים: {commentary}\nאיפוס: Ctrl+0",
+    "cancelExportToWord": "ביתול השליחה ל-Word"
   },
   "versions": {
     "active": "נוסח: {name}",
@@ -189,5 +197,6 @@
     "rishonim": "ראשונים",
     "acharonim": "אחרונים",
     "other": "אחר"
-  }
+  },
+  "exportLargeAsFile": "הספר גדול - נפתח ב-Word כקובץ"
 }

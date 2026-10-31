@@ -347,6 +347,12 @@ Continue?</value>
   <data name="Settings_Subtitle" xml:space="preserve">
     <value>Choose which components appear in the toolbar and which is the main button</value>
   </data>
+  <data name="Settings_General_Title" xml:space="preserve">
+    <value>General Settings</value>
+  </data>
+  <data name="Settings_General_Subtitle" xml:space="preserve">
+    <value>Interface language and optional Word macros</value>
+  </data>
   <data name="Settings_Available" xml:space="preserve">
     <value>Available Components</value>
   </data>
@@ -387,9 +393,9 @@ Continue?</value>
     <value>Interface language</value>
   </data>
   <data name="Settings_LanguageHint" xml:space="preserve">
-    <value>Takes full effect after restarting Word.</value>
+    <value>Some settings may only take effect after Word is restarted.</value>
   </data>
   <data name="Settings_RestartWordNotice" xml:space="preserve">
-    <value>The interface language was changed. Restart Word for the change to take full effect.</value>
+    <value>Some settings may only take effect after Word is restarted.</value>
   </data>
 </root>

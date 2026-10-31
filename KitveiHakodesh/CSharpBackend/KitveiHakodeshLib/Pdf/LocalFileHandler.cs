@@ -127,7 +127,7 @@ namespace KitveiHakodeshLib.LocalFile
         /// The one open path behind a pick (<paramref name="replyId"/> set) and Open-With
         /// (<paramref name="replyId"/> null). Pushes the events the Vue localFileStore handles:
         ///
-        ///   TXT          ->  localFileTxtReady { textContent, fileName, filePath }
+        ///   TXT / Word   ->  localFileTxtReady { fileName, filePath } (the page opens it in FastDocView)
         ///   PDF / HTML   ->  localFileReady { url, fileName, filePath, isOtzariaAddin }
         ///   Word family  ->  localFileConversionStarted { fileName, filePath }, then
         ///                    localFileConversionReady { url, fileName, filePath } (fast path:
@@ -158,12 +158,17 @@ namespace KitveiHakodeshLib.LocalFile
                     return;
                 }
 
+                WindowsRecentDocuments.Add(filePath);
+
                 string fileName = Path.GetFileName(filePath);
 
-                if (LocalFileOpenRules.IsText(filePath))
+                // Text and the Word family open in the page's FastDocView (windowed reading through
+                // the service): the page is told the path only - never the file's content - and no
+                // Word -> PDF conversion starts. "Open as PDF" on that page converts on request
+                // (restoreLocalFile). The page's localFileStore routes this event by extension.
+                if (LocalFileOpenRules.IsText(filePath) || needsConvert)
                 {
-                    string content = TextEncodingDetector.ReadAllText(filePath);
-                    _bridge.PushEvent(new { @event = "localFileTxtReady", textContent = content, fileName, filePath, openInNewTab });
+                    _bridge.PushEvent(new { @event = "localFileTxtReady", fileName, filePath, openInNewTab });
                     if (replyId != null) _bridge.Reply(replyId, new { cancelled = false });
                     return;
                 }
@@ -286,6 +291,22 @@ namespace KitveiHakodeshLib.LocalFile
                 }
 
                 string error = LocalFileOpenRules.OpenInDefaultApp(filePath);
+                _bridge.Reply(id, error == null ? (object)new { ok = true } : new { error });
+            }
+            catch (Exception ex) { _bridge.Reply(id, new { error = ex.Message }); }
+        }
+
+        /// <summary>PDF viewer TOC autosave: write an incremental-save tail back into the file
+        /// (rules in PdfIncrementalSaveWriter). Bytes arrive base64 over the JSON bridge.</summary>
+        public void HandleWritePdfTail(JsonElement root, string id)
+        {
+            try
+            {
+                string error = PdfIncrementalSaveWriter.WriteTail(
+                    root.GetProperty("filePath").GetString(),
+                    root.GetProperty("offset").GetInt64(),
+                    Convert.FromBase64String(root.GetProperty("tail").GetString() ?? ""),
+                    Convert.FromBase64String(root.GetProperty("anchor").GetString() ?? ""));
                 _bridge.Reply(id, error == null ? (object)new { ok = true } : new { error });
             }
             catch (Exception ex) { _bridge.Reply(id, new { error = ex.Message }); }

@@ -34,7 +34,7 @@ Everything in the app must feel instant. Speed is a top-priority requirement, no
 
 ## Virtual Scroller Rules
 
-Two long-list scrollers exist. `WindowedScroller.vue` (`src/components`) is the one for new work and for the book-view lines pane; `@tanstack/vue-virtual` remains in the commentary panels and the search-result lists until they are moved.
+`WindowedScroller.vue` (`src/components`) is the only virtual scroller: the book-view lines pane, the commentary panels and the full-text-search results use it. `@tanstack/vue-virtual` is gone — do not bring it back. Short lists that fit in memory (HebrewBooks, local file search, the FTS filter book list) are plain `v-for` lists whose rows carry `content-visibility: auto` + `contain-intrinsic-size`, so off-screen rows cost no layout or paint; keyboard highlight uses `useInputListNavigation` with `containerElement` + `data-nav-item`.
 
 ### WindowedScroller (`src/components/WindowedScroller.vue`)
 
@@ -49,10 +49,6 @@ Mounts a sliding window of REAL rows in normal flow — no estimated positions, 
 - Keep the window small: it is what every reflow (resize, zoom) lays out. Extend by small steps, trim with a margin that EXCEEDS the extension edge (or the two sides extend and trim each other forever).
 - When the row CONTENT changes under the same indexes (a text version swap), keep the old content in place and bump `rowSourceVersion`; the scroller re-asks its window and each row re-renders held in place. Blanking content collapses the rows and loses the position. Any per-row render cache must key on the content, not only on the index and version.
 - Rows outside the window that must stay mounted (text-selection ends) go in `pinnedIndexes`; they render out of flow.
-
-### TanStack (`@tanstack/vue-virtual`, remaining lists)
-
-`@tanstack/vue-virtual` is a virtualizer — it owns the scroll position and all position calculations. Never bypass its internal API by setting `scrollTop` directly, manipulating `measurementsCache`, or computing item positions manually. Always use `virtualizer.scrollToIndex()` for programmatic navigation. Any workaround that directly sets `scrollTop` to a calculated offset (e.g. `lineIndex * estimateSize`) is forbidden — it will break when item heights vary from the estimate and will fight the virtualizer's own scroll management. Do not add new TanStack lists; use `WindowedScroller`.
 
 ## Code Philosophy
 
@@ -272,7 +268,7 @@ The release workflow's Gemini agent writes the user-facing release notes from co
 
 - **Subject starts with the user-visible area**, named as the user sees it: `Book view (lines):`, `Book view toolbar:`, `PDF viewer:`, `Catalog search:`, `Full-text search:`, `Word add-in:`, `Installer:`, `Settings:`, `Home:`. Not component/file names (`WindowedScroller:`, `useBookViewLinesScroll:`).
 - **Say what the user notices**, not the mechanism: "Book view (lines): scrollbar thumb no longer jumps while dragging in long books" — not "anchor through scroll events".
-- **Body: one line `User-facing:` + kind** — `new` / `improved` / `fixed` / `none` — and the concrete effect. Internal-only work (refactors, cleanup, CI, licensing, build signing, tests) gets `User-facing: none` so the agent drops it.
+- **Body: one line per user-visible effect: `User-facing: new|improved|fixed - <Area>: <one plain sentence>`** — Area = the name in `.github/scripts/release-glossary.txt`; the sentence is what a non-programmer user notices, no jargon (Gemini uses it as written in the release notes). Internal-only work (refactors, cleanup, CI, licensing, build signing, tests) gets `User-facing: none` so it is dropped. Example: `User-facing: new - Book view: save bookmarks at the exact place in the text (Ctrl+Shift+D)`
 - One area per commit where possible; if a commit spans areas, list each area's effect on its own line.
 - Name the exact control/feature ("HebrewBooks editions dropdown", "Nakdan clean-text options"), never "UI tweaks" / "fixes".
 

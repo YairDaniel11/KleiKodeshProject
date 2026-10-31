@@ -3,6 +3,7 @@ using KitveiHakodesh.Core.Settings;
 using KitveiHakodesh.Core.HebrewBooks;
 using KitveiHakodesh.Core.LocalFiles;
 using KitveiHakodesh.Core.WordDocuments;
+using KitveiHakodesh.Core.FastDocView;
 using KitveiHakodeshService.Dictionary;
 using KitveiHakodeshService.HebrewBooks;
 using KitveiHakodeshService.Http;
@@ -27,6 +28,7 @@ public sealed class Dispatcher(
     UserSettingsService userSettings,
     HttpHostState httpState,
     LocalFileGrants localFileGrants,
+    global::KitveiHakodesh.Core.FastDocView.FastDocViewOpenDocuments fastDocViewDocuments,
     KitveiHakodeshService.Pdf.WordConversionService wordConversion,
     KitveiHakodeshService.Http.OwnerRegistry owners,
     KitveiHakodeshService.KitveiHakodesh.Updater updater,
@@ -155,6 +157,47 @@ public sealed class Dispatcher(
                     }));
                 }
 
+                // FastDocView: a Word-family / OpenDocument / RTF / text file read in windows of
+                // blocks (Core FastDocView/). Only rendered windows travel, never the whole file.
+                // A changed file or an unknown id throws FastDocViewSourceChangedException, whose
+                // message the page recognises and reopens on.
+                case "fastDocViewOpen":
+                {
+                    var a = MsgPack.De<FastDocViewOpenArgs>(req.Args);
+                    if (!localFileGrants.TryValidateFastDocViewSource(a.Path, out string full, out string error))
+                        return RpcResponse.Err(error);
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Open(full)));
+                }
+                case "fastDocViewBlocks":
+                {
+                    var a = MsgPack.De<FastDocViewBlocksArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Blocks(a.DocumentId, a.First, a.Count)));
+                }
+                case "fastDocViewHeadings":
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Headings(MsgPack.De<FastDocViewDocumentArgs>(req.Args).DocumentId)));
+                case "fastDocViewSearch":
+                {
+                    var a = MsgPack.De<FastDocViewSearchArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Search(a.DocumentId, a.Query, a.MatchCase, a.FromBlock, a.MaxBlocks)));
+                }
+                case "fastDocViewBookmark":
+                {
+                    var a = MsgPack.De<FastDocViewBookmarkArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Bookmark(a.DocumentId, a.Name)));
+                }
+                case "fastDocViewSections":
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Sections(MsgPack.De<FastDocViewDocumentArgs>(req.Args).DocumentId)));
+                case "fastDocViewWeights":
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Weights(MsgPack.De<FastDocViewDocumentArgs>(req.Args).DocumentId)));
+                case "fastDocViewScan":
+                {
+                    var a = MsgPack.De<FastDocViewScanArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(fastDocViewDocuments.Scan(a.DocumentId, a.Blocks)));
+                }
+                case "fastDocViewClose":
+                    fastDocViewDocuments.Close(MsgPack.De<FastDocViewDocumentArgs>(req.Args).DocumentId);
+                    return RpcResponse.Ok(MsgPack.Ser(new PongResult()));
+
                 // Show the NATIVE open-file dialog on the service's desktop (dev's replacement for
                 // the browser <input type=file>, which yields only a blob — no absolute path, so no
                 // reload persistence). Returns just the chosen PATH; the client then authorizes it
@@ -235,6 +278,19 @@ public sealed class Dispatcher(
                         : new OpenInDefaultAppResult { Error = openError }));
                 }
 
+                // PDF viewer TOC autosave — the dev-mode equivalent of the hosted "writePdfTail"
+                // bridge action. Same path checks as a shell-open, then Core's tail writer.
+                case "writePdfTail":
+                {
+                    var a = MsgPack.De<WritePdfTailArgs>(req.Args);
+                    if (!localFileGrants.TryValidateForShellOpen(a.Path, out string full, out string error))
+                        return RpcResponse.Ok(MsgPack.Ser(new OpenInDefaultAppResult { Error = error }));
+                    string? writeError = PdfIncrementalSaveWriter.WriteTail(full, a.Offset, a.Tail, a.Anchor);
+                    return RpcResponse.Ok(MsgPack.Ser(writeError is null
+                        ? new OpenInDefaultAppResult { Ok = true }
+                        : new OpenInDefaultAppResult { Error = writeError }));
+                }
+
                 // Open assembled HTML as a new Word document — the dev-mode equivalent of the
                 // hosted app's "exportToWord" bridge action (WordExporter.ExportCore). Word
                 // imports HTML only by opening a file, so the service writes a temp .html named
@@ -242,10 +298,19 @@ public sealed class Dispatcher(
                 case "exportToWord":
                 {
                     var a = MsgPack.De<ExportToWordArgs>(req.Args);
-                    string? exportError = await WordDocumentExporter.ExportHtmlAsNewDocumentAsync(a.Html, a.Title);
-                    return RpcResponse.Ok(MsgPack.Ser(exportError is null
-                        ? new ExportToWordResult { Ok = true }
+                    string? exportError = await WordDocumentExporter.ExportHtmlAsNewDocumentAsync(a.Html, a.Title, a.RequestId);
+                    return RpcResponse.Ok(MsgPack.Ser(exportError is null ? new ExportToWordResult { Ok = true }
+                        : exportError == WordDocumentExporter.CancelledResult ? new ExportToWordResult { Cancelled = true }
                         : new ExportToWordResult { Error = exportError }));
+                }
+
+                // Stop a running exportToWord / pasteIntoWord by its request id: a Word that call started
+                // is ended; the user's own Word is never closed (an export's own document is closed once
+                // it opens; a paste not yet begun is skipped, one Word has begun is left as Word made it).
+                case "cancelWordExport":
+                {
+                    var a = MsgPack.De<CancelWordExportArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new CancelWordExportResult { Ok = WordDocumentExporter.CancelExport(a.RequestId) }));
                 }
 
                 // Paste the Windows clipboard into Word at the cursor — the dev-mode equivalent
@@ -256,9 +321,10 @@ public sealed class Dispatcher(
                 // at their document. Runs on an STA thread inside PasteAsync.
                 case "pasteIntoWord":
                 {
-                    string? error = await WordDocumentExporter.PasteClipboardAtCursorAsync();
-                    return RpcResponse.Ok(MsgPack.Ser(error is null
-                        ? new PasteIntoWordResult { Ok = true }
+                    var a = req.Args is { Length: > 0 } ? MsgPack.De<PasteIntoWordArgs>(req.Args) : new PasteIntoWordArgs();
+                    string? error = await WordDocumentExporter.PasteClipboardAtCursorAsync(a.RequestId);
+                    return RpcResponse.Ok(MsgPack.Ser(error is null ? new PasteIntoWordResult { Ok = true }
+                        : error == WordDocumentExporter.CancelledResult ? new PasteIntoWordResult { Cancelled = true }
                         : new PasteIntoWordResult { Error = error }));
                 }
 
@@ -631,6 +697,26 @@ public sealed class Dispatcher(
                     return RpcResponse.Ok(MsgPack.Ser(new LinesResult { Rows = seforim.GetLinesPaged(a.BookId, a.Limit, a.Offset, a.VersionId) }));
                 }
 
+                // The in-book / commentary substring search, whole: index when it can, native scan otherwise (Core).
+                case "linesSubstringSearch":
+                {
+                    var a = MsgPack.De<LinesSubstringSearchArgs>(req.Args);
+                    var triples = a.RangeTriples ?? Array.Empty<int>();
+                    var ranges = new List<global::KitveiHakodesh.Core.SeforimDbFullTextSearch.FtsLineRange>(triples.Length / 3);
+                    for (int i = 0; i + 2 < triples.Length; i += 3)
+                        ranges.Add(new global::KitveiHakodesh.Core.SeforimDbFullTextSearch.FtsLineRange { BookId = triples[i], FirstLineIndex = triples[i + 1], LastLineIndex = triples[i + 2] });
+                    var hits = seforim.SubstringSearch(fts.Coordinator, a.Query ?? "", ranges, a.VersionId);
+                    var bookIds = new int[hits.Count]; var lineIndexes = new int[hits.Count]; var lineIds = new int[hits.Count]; var counts = new int[hits.Count];
+                    for (int i = 0; i < hits.Count; i++) { bookIds[i] = hits[i].BookId; lineIndexes[i] = hits[i].LineIndex; lineIds[i] = hits[i].LineId; counts[i] = hits[i].Count; }
+                    return RpcResponse.Ok(MsgPack.Ser(new LinesSubstringSearchResult { BookIds = bookIds, LineIndexes = lineIndexes, LineIds = lineIds, Counts = counts }));
+                }
+
+                case "getLineIds":
+                {
+                    var a = MsgPack.De<LineIdsByRangeArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new LineIdsByRangeResult { Ids = seforim.GetLineIds(a.BookId, a.FromIndex, a.ToIndex) }));
+                }
+
                 case "getLineCharCounts":
                 {
                     var a = MsgPack.De<LineCharCountsArgs>(req.Args);
@@ -685,6 +771,11 @@ public sealed class Dispatcher(
                 {
                     var a = MsgPack.De<LineIdsArgs>(req.Args);
                     return RpcResponse.Ok(MsgPack.Ser(new CommentaryLinksResult { Rows = seforim.GetCommentaryLinksForSourceLineRange(a.LineIds) }));
+                }
+                case "getCommentaryLinkGroupsForSourceLineRange":
+                {
+                    var a = MsgPack.De<LineIdsArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(new CommentaryLinkGroupsResult { Rows = seforim.GetCommentaryLinkGroupsForSourceLineRange(a.LineIds) }));
                 }
 
                 case "getLineContents":
@@ -831,6 +922,13 @@ public sealed class Dispatcher(
                     return RpcResponse.Ok(MsgPack.Ser(res));
                 }
 
+                // Snippet texts for the rows a page shows (the hits already carry their descriptors).
+                case "ftsSnippetTexts":
+                {
+                    var a = MsgPack.De<FtsSnippetTextsArgs>(req.Args);
+                    return RpcResponse.Ok(MsgPack.Ser(fts.SnippetTexts(a.LineIds ?? new(), a.ShortLineIds ?? new())));
+                }
+
                 case "ftsIndexingStatus":
                     return RpcResponse.Ok(MsgPack.Ser(fts.Status()));
 
@@ -920,7 +1018,7 @@ public sealed class Dispatcher(
                 var a = MsgPack.De<FtsSearchStreamArgs>(req.Args);
                 await fts.StreamSearch(
                     a.Query ?? "", a.MaxWordDistance, a.RequireOrdered, a.ContextWords,
-                    chunk => writeFrame(RpcResponse.Ok(MsgPack.Ser(chunk))), ct);
+                    chunk => writeFrame(RpcResponse.Ok(MsgPack.Ser(chunk))), ct, a.ResumeAfterLineId);
                 return true;
             }
 

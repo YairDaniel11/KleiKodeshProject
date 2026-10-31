@@ -164,7 +164,7 @@ Navigation rules:
 
 Singleton routes enforce one-tab-per-route and are never persisted across sessions. The authoritative list is `SINGLETON_ROUTES` in `tabStore.ts` (with Hebrew titles in `SINGLETON_TITLES` beside it): `/settings`, `/books`, `/hebrewbooks`, `/workspaces`, `/hebrew-calendar`, `/dictionary`, `/midot`, `/file-search`.
 
-Multi-instance routes (`/book-view`, `/search`, `/pdf-view`, `/html-view`, `/txt-view`) can have multiple tabs open simultaneously.
+Multi-instance routes (`/book-view`, `/search`, `/pdf-view`, `/html-view`, `/txt-view`, `/fast-doc-view`) can have multiple tabs open simultaneously.
 
 ## Pages & Routes
 
@@ -180,6 +180,7 @@ Multi-instance routes (`/book-view`, `/search`, `/pdf-view`, `/html-view`, `/txt
 | `/pdf-view`        | `PdfViewPage.vue`          | multi-instance                           |
 | `/html-view`       | `HtmlViewPage.vue`         | multi-instance                           |
 | `/txt-view`        | `TxtViewPage.vue`          | multi-instance (keyed by tabId)          |
+| `/fast-doc-view`   | `FastDocViewPage.vue`      | multi-instance (keyed by tabId + file)   |
 | `/workspaces`      | `WorkspaceManagerPage.vue` | singleton                                |
 | `/hebrew-calendar` | `HebrewCalendarPage.vue`   | singleton                                |
 | `/dictionary`      | `DictionaryPage.vue`       | singleton                                |
@@ -237,7 +238,7 @@ The main book reader. Orchestrates a split pane (text above, commentary below), 
 
 **Main composables:**
 - `useBookView.ts` — central composable; owns data loading, state, event handlers, and watchers
-- `useBookViewSearch.ts` / `useBookViewSearchPanel.ts` — content search (line-based) and its panel state
+- `useBookViewSearch.ts` / `useBookViewSearchPanel.ts` — in-book substring search and its panel state. The search runs in the service (`linesSubstringSearch`, Core `SeforimDbLineSubstringSearch`): FTS index narrowing from two characters + native confirm, else a native scan of the lines — the frontend sends ranges and gets line ids and counts; no book text is held for search. Lines near the reader are asked first; typing narrows from the previous (or in-flight) answer
 - `useBookViewScrollSync.ts` — syncs active TOC entry and auto-selects commentary on scroll
 - `useBookViewSessionRestore.ts` — restores per-book view state on mount
 - `useBookViewPinnedCommentary.ts` — tracks the pinned commentary book with default-commentator fallback
@@ -394,6 +395,10 @@ Native Vue viewer for local `.txt` files. Renders content directly in a `<div>` 
 - `useTxtViewSearch.ts` — in-document search
 - `useTxtViewCopyMenu.ts` — copy context menu
 
+### fast-doc-view/
+
+The FastDocView page: Word-family / OpenDocument / RTF / text files read in windows of blocks from the service (ops `fastDocView*`, contract in the folder README). Its own feature - not the book view; it shares only `src/components` / `src/composables` pieces and `assets/styles/readingColumn.css`. Routing is behind `OPEN_DOCUMENTS_IN_FAST_DOC_VIEW` in `utils/fastDocViewFiles.ts` (off until the service ops exist).
+
 ### local-file-search/
 
 File system search over the DocumentLocator service. Singleton route `/file-search`.
@@ -501,8 +506,6 @@ Two plain modules live in `src/stores/` alongside the Pinia stores. They hold no
 
 **useAppNavigation.ts** — central navigation handler. Routes singletons via `navigateToSingleton()`, handles file picker, external links, and search navigation.
 
-**useVirtualScrollerKeys.ts** — keyboard nav for virtual scrollers (`Ctrl+Home`, `Ctrl+End`). Required on every component that uses `@tanstack/vue-virtual`. The scroll container must have `tabindex="0"`.
-
 **useZoom.ts** — zoom handler for keyboard (`Ctrl+±/0`), wheel (`Ctrl+scroll`), and pinch (2-finger touch). Config: MIN=50, MAX=200, DEFAULT=100, STEP=10.
 
 **useListKeyNav.ts** — arrow-key + Home/End navigation for plain DOM lists that own keyboard focus themselves (roving-focus model); tracks `focusedIndex` and scrolls the focused item into view. For standalone lists only — input-paired lists use `useInputListNavigation.ts`.
@@ -511,7 +514,7 @@ Two plain modules live in `src/stores/` alongside the Pinia stores. They hold no
 
 **useTileGridKeys.ts** — 2D arrow-key navigation for tile grids; computes column count from container width to handle Up/Down correctly.
 
-**useInputListNavigation.ts** — combobox keyboard model (W3C APG): DOM focus stays in a text input while its keydown events move a highlight through the paired list. Handles arrows, PageUp/PageDown, `Ctrl+Home`/`Ctrl+End`, Enter (Ctrl+Enter = new tab); plain Home/End and Left/Right stay caret keys. Supports plain containers (`scrollIntoView` over `[data-nav-item]`), virtual lists (`getVirtualizer` → `scrollToIndex`), and tile grids (`getColumnsPerRow`). Used by every input-paired list: home search dropdown, address bar, book catalog search, HebrewBooks, local file search, full-text-search filter panel.
+**useInputListNavigation.ts** — combobox keyboard model (W3C APG): DOM focus stays in a text input while its keydown events move a highlight through the paired list. Handles arrows, PageUp/PageDown, `Ctrl+Home`/`Ctrl+End`, Enter (Ctrl+Enter = new tab); plain Home/End and Left/Right stay caret keys. Supports plain containers (`scrollIntoView` over `[data-nav-item]`) and tile grids (`getColumnsPerRow`). Used by every input-paired list: home search dropdown, address bar, book catalog search, HebrewBooks, local file search, full-text-search filter panel.
 
 **useLineCopy.ts** — intercepts the browser `copy` event on a scroller element; when the user has selected all, writes each line as a `<div>` in `text/html` and strips HTML tags for `text/plain`, so copied text has no inline line breaks.
 

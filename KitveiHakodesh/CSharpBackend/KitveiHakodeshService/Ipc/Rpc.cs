@@ -119,6 +119,18 @@ public sealed class OpenInDefaultAppResult
     public string? Error { get; set; }
 }
 
+/// <summary>Args for <c>writePdfTail</c> — the PDF viewer's TOC autosave: an incremental-save
+/// tail written at <see cref="Offset"/>, guarded by <see cref="Anchor"/> (see
+/// PdfIncrementalSaveWriter). Replies with <see cref="OpenInDefaultAppResult"/>'s { ok, error }.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class WritePdfTailArgs
+{
+    public string? Path { get; set; }
+    public long Offset { get; set; }
+    public byte[]? Tail { get; set; }
+    public byte[]? Anchor { get; set; }
+}
+
 /// <summary>Args for <c>exportToWord</c> — the assembled document HTML and the book title used
 /// for the temp file name.</summary>
 [MessagePack.MessagePackObject(keyAsPropertyName: true)]
@@ -126,6 +138,23 @@ public sealed class ExportToWordArgs
 {
     public string? Html { get; set; }
     public string? Title { get; set; }
+    /// <summary>Optional id chosen by the page; <c>cancelWordExport</c> with the same id stops this export.</summary>
+    public string? RequestId { get; set; }
+}
+
+/// <summary>Args for <c>cancelWordExport</c>: the request id of the exportToWord / pasteIntoWord to stop.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class CancelWordExportArgs
+{
+    public string? RequestId { get; set; }
+}
+
+/// <summary>Result of <c>cancelWordExport</c>: <see cref="Ok"/> true when a running export was told to stop
+/// (false: none running with that id - already finished).</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class CancelWordExportResult
+{
+    public bool Ok { get; set; }
 }
 
 /// <summary>Result of <c>exportToWord</c>: <see cref="Ok"/> true once Word opened the exported
@@ -136,6 +165,8 @@ public sealed class ExportToWordResult
 {
     public bool Ok { get; set; }
     public string? Error { get; set; }
+    /// <summary>True when the export was stopped by <c>cancelWordExport</c> (Ok false, no Error).</summary>
+    public bool Cancelled { get; set; }
 }
 
 /// <summary>Result of <c>pasteIntoWord</c>: <see cref="Ok"/> true once the clipboard was pasted
@@ -147,6 +178,15 @@ public sealed class PasteIntoWordResult
 {
     public bool Ok { get; set; }
     public string? Error { get; set; }
+    /// <summary>True when the paste was stopped by <c>cancelWordExport</c> (Ok false, no Error).</summary>
+    public bool Cancelled { get; set; }
+}
+
+/// <summary>Args for <c>pasteIntoWord</c>: an optional id; <c>cancelWordExport</c> with it stops the paste.</summary>
+[MessagePack.MessagePackObject(keyAsPropertyName: true)]
+public sealed class PasteIntoWordArgs
+{
+    public string? RequestId { get; set; }
 }
 
 /// <summary>Parameterized SQL (positional '?') for the generic user-settings read/write ops.

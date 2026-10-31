@@ -4,7 +4,8 @@
  * native bars: the same width the browser gives its own bar (measured once), the
  * same theme — the thumb colour the app sets on every native bar through
  * `scrollbar-color` (theme.css) — the hidden-scrollbars mode (main.css), arrow
- * buttons that step and repeat while held, a track that pages toward the pointer,
+ * buttons that step and repeat while held, a track that pages to the row under the
+ * pointer (the parent pages; see WindowedScroller's track hold),
  * and a thumb that drags.
  *
  * It represents the whole list, most of which is not mounted: the parent gives it
@@ -39,12 +40,19 @@ const position = computed(() => props.barState.position.value)
 
 const emit = defineEmits<{
   seek: [position: number]
+  /**
+   * The track was pressed: the position a thumb drag to the pointer would land on.
+   * The parent locks that destination and pages to it on each `trackStep` while
+   * held, until `trackRelease` — a destination, not a pixel, so the row-height
+   * estimate moving under the paging cannot change where it ends.
+   */
+  trackHold: [position: number]
+  trackStep: []
+  trackRelease: []
 }>()
 
 /** What the browser scrolls by per arrow click. */
 const ARROW_STEP_PX = 40
-/** Page step, as Chromium's: most of a viewport, leaving an overlap. */
-const PAGE_FRACTION = 0.875
 const REPEAT_DELAY_MS = 300
 const REPEAT_INTERVAL_MS = 50
 /** The least track a landmark's section gets — enough to put the pointer on. */
@@ -92,8 +100,23 @@ const liveThumbHeight = computed(() => {
   const proportional = (trackHeight.value * viewportHeight.value) / totalHeight.value
   return Math.min(trackHeight.value, Math.max(barWidth.value, proportional))
 })
+/**
+ * The thumb's length follows the estimated total, which wobbles a few percent each
+ * time the window slides and a row's real height replaces its estimate. That wobble
+ * is not news to the reader, so the shown length only follows a real change: one
+ * past THUMB_LENGTH_HYSTERESIS, the track resizing, or reaching either bound.
+ */
+const THUMB_LENGTH_HYSTERESIS = 0.1
+const steadyThumbHeight = ref(0)
+watch([liveThumbHeight, trackHeight], ([next], [, previousTrack]) => {
+  const shown = steadyThumbHeight.value
+  const atBound = next <= barWidth.value || next >= trackHeight.value
+  if (!shown || !next || atBound || trackHeight.value !== previousTrack || Math.abs(next - shown) / shown > THUMB_LENGTH_HYSTERESIS) {
+    steadyThumbHeight.value = next
+  }
+}, { immediate: true })
 // Frozen while dragged — see the drag section.
-const thumbHeight = computed(() => drag.value?.thumbHeight ?? liveThumbHeight.value)
+const thumbHeight = computed(() => drag.value?.thumbHeight ?? steadyThumbHeight.value)
 const thumbTravel = computed(() => Math.max(0, trackHeight.value - thumbHeight.value))
 
 const trackMap = computed(() =>
@@ -146,7 +169,7 @@ function onThumbPointerDown(event: PointerEvent) {
     startY: event.clientY,
     startThumbTop: thumbTop.value,
     thumbTop: thumbTop.value,
-    thumbHeight: liveThumbHeight.value,
+    thumbHeight: thumbHeight.value,
     travel: thumbTravel.value,
     map: trackMap.value,
     maxPosition: maxPosition.value,
@@ -202,19 +225,25 @@ function onArrowPointerDown(event: PointerEvent, direction: -1 | 1) {
   pressAndHold(event, () => stepBy(direction * ARROW_STEP_PX))
 }
 
+let isTrackHeld = false
+
 function onTrackPointerDown(event: PointerEvent) {
-  if (event.target !== trackElement.value) return
-  const trackTop = trackElement.value!.getBoundingClientRect().top
-  pressAndHold(event, () => {
-    // Page toward the pointer, and stop once the thumb has reached it.
-    const pointerOffset = event.clientY - trackTop
-    const direction = pointerOffset > thumbTop.value + thumbHeight.value ? 1 : pointerOffset < thumbTop.value ? -1 : 0
-    if (direction !== 0) stepBy(direction * viewportHeight.value * PAGE_FRACTION)
-  })
+  if (event.target !== trackElement.value || event.button !== 0) return
+  const pointerOffset = event.clientY - trackElement.value!.getBoundingClientRect().top
+  isTrackHeld = true
+  emit('trackHold', positionForThumbTop(pointerOffset - thumbHeight.value / 2))
+  pressAndHold(event, () => emit('trackStep'))
 }
 
-useEventListener(window, 'pointerup', stopRepeat)
-useEventListener(window, 'pointercancel', stopRepeat)
+function onPointerReleased() {
+  stopRepeat()
+  if (!isTrackHeld) return
+  isTrackHeld = false
+  emit('trackRelease')
+}
+
+useEventListener(window, 'pointerup', onPointerReleased)
+useEventListener(window, 'pointercancel', onPointerReleased)
 
 useEventListener(barElement, 'wheel', (event: WheelEvent) => {
   if (!props.viewport) return
@@ -271,6 +300,7 @@ defineExpose({ barElement, targetAt })
       <div
         v-if="isScrollable"
         class="windowed-scroller-thumb"
+        :class="{ 'is-dragging': isDragging }"
         :style="{ top: `${thumbTop}px`, height: `${thumbHeight}px` }"
         @pointerdown="onThumbPointerDown"
         @pointermove="onThumbPointerMove"
@@ -316,6 +346,18 @@ defineExpose({ barElement, targetAt })
   translate: -50% 0;
   border-radius: 999px;
   background: var(--bar-thumb);
+  /* Glides rather than jumps — ease-out (easeOutCubic): quick to start, slowing into
+     place. A scroll tick, a page step or the estimate correcting itself all flow; a
+     new target mid-glide retargets from where the thumb is. The scroll-follow label
+     (BookViewScrollbarTocTooltip) glides on the same curve. */
+  transition:
+    top var(--bar-glide-ms, 220ms) cubic-bezier(0.33, 1, 0.68, 1),
+    height var(--bar-glide-ms, 220ms) cubic-bezier(0.33, 1, 0.68, 1),
+    background-color 120ms;
+}
+/* Under the hand it must track the pointer exactly. */
+.windowed-scroller-thumb.is-dragging {
+  transition: background-color 120ms;
 }
 .windowed-scroller-thumb:hover {
   background: var(--bar-thumb-hover);

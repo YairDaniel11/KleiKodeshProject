@@ -7,6 +7,7 @@
  */
 
 import { hasHostBridge, emitWebviewEvent } from './seforimDb'
+import { opensInFastDocView } from '@/utils/fastDocViewFiles'
 import { serviceCall, serviceCallVoid } from './serviceClient'
 import { ServiceUnavailableError, isPersistentReason } from './serviceAvailability'
 import { decodeTextDetectEncoding } from '@/utils/textEncoding'
@@ -133,8 +134,9 @@ export async function pickLocalFile(
         picked.fileName || filePath.substring(Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/')) + 1)
       const ext = fileName.substring(fileName.lastIndexOf('.')).toLowerCase()
 
-      if (ext === '.txt') {
-        // .txt opens in /txt-view straight off the path (TxtViewPage reads it via the bridge).
+      if (ext === '.txt' || opensInFastDocView(filePath)) {
+        // .txt opens in /txt-view straight off the path (TxtViewPage reads it via the bridge);
+        // with FastDocView on, Word-family files take the same event and the store routes them.
         emitWebviewEvent({ event: 'localFileTxtReady', fileName, filePath, openInNewTab })
         return { url: '', fileName, filePath }
       }
@@ -298,14 +300,59 @@ export async function openFileInDefaultApp(filePath: string): Promise<boolean> {
 }
 
 /**
- * Open an http/https address in the user's default browser.
+ * PDF viewer TOC autosave: write an incremental-save `tail` back into the PDF at `offset`
+ * (the length the viewer loaded). `anchor` = the loaded bytes just before `offset`; the
+ * write is refused when they no longer match the disk (rules: Core PdfIncrementalSaveWriter).
+ * Hosted: the C# host writes (`writePdfTail`, bytes as base64). Dev: the service op.
+ * Returns an error message, or null when written.
+ */
+export async function writePdfTail(
+  filePath: string,
+  offset: number,
+  tail: Uint8Array,
+  anchor: Uint8Array,
+): Promise<string | null> {
+  try {
+    const r =
+      typeof window.__webviewAction !== 'function'
+        ? // Copied into THIS realm: the viewer's arrays come from the PDF.js iframe, and a
+          // cross-realm Uint8Array fails `instanceof` in the encoder and goes out as a map.
+          await serviceCall<{ ok?: boolean; error?: string }>('writePdfTail', {
+            path: filePath,
+            offset,
+            tail: new Uint8Array(tail),
+            anchor: new Uint8Array(anchor),
+          })
+        : await action<{ ok?: boolean; error?: string }>('writePdfTail', {
+            filePath,
+            offset,
+            tail: bytesToBase64(tail),
+            anchor: bytesToBase64(anchor),
+          })
+    return r?.ok ? null : r?.error || 'write failed'
+  } catch (e) {
+    return String(e)
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+/**
+ * Open an http/https address in the user's default browser, or a mailto: address in the
+ * default mail app.
  *
  * Hosted: the C# host shell-executes the URL (`openUrlInSystemBrowser`) - a plain
  * window.open inside WebView2 would open a WebView popup, not the system browser.
  * Dev: the page already runs in the system browser, so a new tab is the same thing.
  */
 export async function openUrlInSystemBrowser(url: string): Promise<boolean> {
-  if (!/^https?:\/\//i.test(url)) return false
+  if (!/^(?:https?:\/\/|mailto:)/i.test(url)) return false
   if (typeof window.__webviewAction !== 'function') {
     window.open(url, '_blank', 'noopener,noreferrer')
     return true
@@ -760,11 +807,15 @@ export function localFileIndexStatus(): Promise<LocalFileIndexStatus> {
  * NOTE: guard on __webviewAction, NOT isHosted — isHosted is TRUE in dev while the bridge
  * channel is absent, so an isHosted check would send dev down the hosted path and reject.
  */
-export async function exportToWord(html: string, title: string = ''): Promise<{ ok?: boolean; error?: string }> {
+export async function exportToWord(
+  html: string,
+  title: string = '',
+  requestId?: string,
+): Promise<{ ok?: boolean; error?: string; cancelled?: boolean }> {
   if (typeof window.__webviewAction !== 'function') {
     try {
-      const r = await serviceCall<{ ok?: boolean; error?: string }>('exportToWord', { html, title })
-      return { ok: !!r?.ok, error: r?.error }
+      const r = await serviceCall<{ ok?: boolean; error?: string; cancelled?: boolean }>('exportToWord', { html, title, requestId })
+      return { ok: !!r?.ok, error: r?.error, cancelled: !!r?.cancelled }
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
     }
@@ -773,9 +824,28 @@ export async function exportToWord(html: string, title: string = ''): Promise<{ 
   // instead of replying ok=true immediately, so this can reject where it previously always
   // resolved. Callers get an { error } to inspect rather than an unhandled rejection.
   try {
-    return await action<{ ok?: boolean; error?: string }>('exportToWord', { html, title })
+    return await action<{ ok?: boolean; error?: string; cancelled?: boolean }>('exportToWord', { html, title, requestId })
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * Stop the running exportToWord started with the same `requestId`: its exportToWord call then
+ * resolves at once with `{ cancelled: true }`. A Word instance that export started is ended; a Word
+ * the user already had open is never closed - only the export's own document is closed (unsaved)
+ * once Word finishes opening it. Resolves true when an export was running, false otherwise.
+ */
+export async function cancelWordExport(requestId: string): Promise<boolean> {
+  try {
+    if (typeof window.__webviewAction !== 'function') {
+      const r = await serviceCall<{ ok?: boolean }>('cancelWordExport', { requestId })
+      return !!r?.ok
+    }
+    const r = await action<{ ok?: boolean }>('cancelWordExport', { requestId })
+    return !!r?.ok
+  } catch {
+    return false
   }
 }
 
@@ -795,8 +865,8 @@ export async function exportToWord(html: string, title: string = ''): Promise<{ 
  * bridge channel is absent, so an isHosted check would send dev down the hosted path
  * and reject with 'bridge not available'.
  */
-export async function pasteIntoWord(): Promise<{ ok?: boolean; error?: string }> {
-  const result = await runPasteIntoWord()
+export async function pasteIntoWord(requestId?: string): Promise<{ ok?: boolean; error?: string; cancelled?: boolean }> {
+  const result = await runPasteIntoWord(requestId)
   // Reported HERE rather than at the call sites: all five of them fire this as
   // `pasteIntoWord().catch(() => {})` from inside a copy event, where there is no
   // sensible place to await an answer. Surfacing the failure centrally is what turns
@@ -806,17 +876,17 @@ export async function pasteIntoWord(): Promise<{ ok?: boolean; error?: string }>
   return result
 }
 
-async function runPasteIntoWord(): Promise<{ ok?: boolean; error?: string }> {
+async function runPasteIntoWord(requestId?: string): Promise<{ ok?: boolean; error?: string; cancelled?: boolean }> {
   if (typeof window.__webviewAction !== 'function') {
     try {
-      const r = await serviceCall<{ ok?: boolean; error?: string }>('pasteIntoWord', {})
-      return { ok: !!r?.ok, error: r?.error }
+      const r = await serviceCall<{ ok?: boolean; error?: string; cancelled?: boolean }>('pasteIntoWord', { requestId })
+      return { ok: !!r?.ok, error: r?.error, cancelled: !!r?.cancelled }
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
     }
   }
   try {
-    return await action<{ ok?: boolean; error?: string }>('pasteIntoWord', {})
+    return await action<{ ok?: boolean; error?: string; cancelled?: boolean }>('pasteIntoWord', { requestId })
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
@@ -1050,12 +1120,17 @@ export function cancelHbDownload(bookId: string): void {
 }
 
 /**
- * Abort an in-flight Word/document conversion (the ביטול button). Dev only — trips the service's
- * per-source cancellation so it discards the result and deletes the partial cache file (Word
- * self-quits, no orphan). Fire-and-forget. Hosted mode has its own conversion-cancel path.
+ * Abort an in-flight Word/document conversion (the cancel button). Both legs end only the Word
+ * instance the converter itself started and delete the partial output: dev through the service's
+ * cancelConversion op, hosted through the C# host's cancelLocalFileConversion action
+ * (KitveiHakodeshLib WordToPdfConverter). Fire-and-forget.
  */
 export function cancelLocalFileConversion(sourcePath: string): void {
-  if (typeof window.__webviewAction === 'function' || !sourcePath) return
+  if (!sourcePath) return
+  if (typeof window.__webviewAction === 'function') {
+    void action('cancelLocalFileConversion', { filePath: sourcePath }).catch(() => {})
+    return
+  }
   serviceCallVoid('cancelConversion', { path: sourcePath })
 }
 

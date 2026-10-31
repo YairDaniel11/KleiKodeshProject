@@ -73,9 +73,13 @@ export function wrapRtlHtml(innerHtml: string): string {
  * (observed live with the PDF viewer's per-row divs).
  */
 export function htmlToPlainText(html: string): string {
+  // The newline goes BEFORE each block's closing tag, which stays. Replacing the tag
+  // left every block unclosed, so each line nested inside the one before it, and past
+  // Chromium's 512-deep parser limit the content was re-parented out of order — a copy
+  // of more than ~500 lines came out with every heading glued to the next line's body.
   const withBreaks = html
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(?:div|p|h[1-6]|li)>/gi, '\n')
+    .replace(/<\/(div|p|h[1-6]|li)>/gi, '\n</$1>')
   const tempDiv = document.createElement('div')
   tempDiv.innerHTML = withBreaks
   return (tempDiv.textContent ?? '').trim()
@@ -86,7 +90,7 @@ export function htmlToPlainText(html: string): string {
  * calls this after writing to the clipboard — used by onPasteIntoWord to fire the
  * bridge action only after the clipboard write is confirmed complete.
  */
-let _afterCopyCallback: (() => void) | null = null
+let _afterCopyCallback: ((copiedHtml: string) => void) | null = null
 
 /**
  * Triggers execCommand('copy') so that useScopedCopy intercepts the copy
@@ -103,7 +107,7 @@ let _afterCopyCallback: (() => void) | null = null
  * Returns execCommand's own success flag so callers can gate follow-up work (e.g. only
  * asking C# to paste into Word once the clipboard write actually happened).
  */
-export function triggerCopy(afterCopy?: () => void, targetDoc: Document = document): boolean {
+export function triggerCopy(afterCopy?: (copiedHtml: string) => void, targetDoc: Document = document): boolean {
   _afterCopyCallback = afterCopy ?? null
   try {
     return targetDoc.execCommand('copy')
@@ -139,13 +143,15 @@ function handleScopedCopyEvent(
   const formatted = buildFormattedHtml()
   if (formatted === null) return
 
-  event.clipboardData?.setData('text/html', wrapRtlHtml(formatted))
+  const html = wrapRtlHtml(formatted)
+  event.clipboardData?.setData('text/html', html)
   event.clipboardData?.setData('text/plain', htmlToPlainText(formatted))
   event.preventDefault()
 
+  // The callback gets the HTML that went onto the clipboard (send-to-Word measures it).
   const callback = _afterCopyCallback
   _afterCopyCallback = null
-  callback?.()
+  callback?.(html)
 }
 
 /**

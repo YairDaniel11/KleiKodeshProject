@@ -42,7 +42,7 @@ export interface WindowedScrollerBarMappingOptions {
   /** Row indexes of the list's section starts, coarse tier first. */
   landmarkTiers: () => readonly (readonly number[])[]
   /** A size weight per row, `count` long, or nothing — see the file comment. */
-  rowWeights: () => readonly number[] | null | undefined
+  rowWeights: () => ArrayLike<number> | null | undefined
 }
 
 /** How much of each fresh window average flows into the average estimate. */
@@ -81,12 +81,12 @@ export function useWindowedScrollerBarMapping(options: WindowedScrollerBarMappin
   let appliedCalibration: WeightCalibration | null = null
   /** `prefixSums[i]` = estimated height of rows [0, i); `count + 1` long. */
   let prefixSums: Float64Array | null = null
-  let prefixSumsWeights: readonly number[] | null = null
+  let prefixSumsWeights: ArrayLike<number> | null = null
   /** The window the last fit was taken from — a fit per window, not per scroll tick. */
   let fittedWindowStart = -1
   let fittedWindowEnd = -1
 
-  function usableWeights(): readonly number[] | null {
+  function usableWeights(): ArrayLike<number> | null {
     const weights = options.rowWeights()
     return weights && weights.length === options.count() ? weights : null
   }
@@ -100,7 +100,7 @@ export function useWindowedScrollerBarMapping(options: WindowedScrollerBarMappin
    * geometric grid of capacities (the one non-linear parameter). Null when the rows
    * cannot tell the parameters apart.
    */
-  function fitCalibration(weights: readonly number[]): WeightCalibration | null {
+  function fitCalibration(weights: ArrayLike<number>): WeightCalibration | null {
     const start = options.windowStart.value
     const end = options.windowEnd.value
     const rowWeights: number[] = []
@@ -151,7 +151,7 @@ export function useWindowedScrollerBarMapping(options: WindowedScrollerBarMappin
     )
   }
 
-  function rebuildPrefixSums(weights: readonly number[], applied: WeightCalibration) {
+  function rebuildPrefixSums(weights: ArrayLike<number>, applied: WeightCalibration) {
     const count = weights.length
     const sums = new Float64Array(count + 1)
     let total = 0
@@ -281,18 +281,60 @@ export function useWindowedScrollerBarMapping(options: WindowedScrollerBarMappin
     return Math.max(0, Math.min(count - 1, index))
   }
 
+  // ── Sync ───────────────────────────────────────────────────────────────────────
+  //
+  // Only the position depends on scrollTop. The estimates, the total and the
+  // landmark positions depend on the window (which rows, at what real height), the
+  // weights and the landmark list — so they are recomputed only when one of those
+  // changes. A plain scroll tick within the window allocates nothing and leaves the
+  // bar's track map (built from these by the bar) untouched; the estimates also
+  // smooth once per window rather than once per tick, so a long pause on one window
+  // cannot drain the smoothing.
+
+  /** The window the estimates and landmark positions were last computed for. */
+  let syncedWindowStart = -1
+  let syncedWindowEnd = -1
+  let syncedScrollHeight = -1
+  let syncedCount = -1
+  let syncedPrefixSums: Float64Array | null = null
+  let syncedTiers: readonly (readonly number[])[] | null = null
+
+  /** The caller may hand over a fresh empty array each time; two empties are the same tiers. */
+  function sameTiers(tiers: readonly (readonly number[])[]) {
+    return tiers === syncedTiers || (tiers.length === 0 && syncedTiers?.length === 0)
+  }
+
   /** Call whenever the viewport scrolled or its rows changed. */
   function syncFromViewport() {
     const viewport = options.viewport()
     if (!viewport) return
-    updateAverageEstimate()
-    updateWeightEstimate()
-    if (!estimatedRowHeight && !prefixSums) return
+    const start = options.windowStart.value
+    const end = options.windowEnd.value
+    const scrollHeight = viewport.scrollHeight
+    const windowChanged = start !== syncedWindowStart || end !== syncedWindowEnd || scrollHeight !== syncedScrollHeight
+    if (windowChanged) {
+      updateAverageEstimate()
+      updateWeightEstimate()
+    }
+    if (!estimatedRowHeight && !prefixSums) {
+      // Nothing to estimate from yet (no rows mounted): try again on the next call.
+      syncedWindowStart = -1
+      return
+    }
     const above = pixelsAboveWindow()
-    const below = estimatedHeightBetween(options.windowEnd.value, options.count())
-    totalHeight.value = Math.round(above + viewport.scrollHeight + below)
+    const count = options.count()
+    const tiers = options.landmarkTiers()
+    if (windowChanged || count !== syncedCount || prefixSums !== syncedPrefixSums || !sameTiers(tiers)) {
+      syncedWindowStart = start
+      syncedWindowEnd = end
+      syncedScrollHeight = scrollHeight
+      syncedCount = count
+      syncedPrefixSums = prefixSums
+      syncedTiers = tiers
+      totalHeight.value = Math.round(above + scrollHeight + estimatedHeightBetween(end, count))
+      landmarkTiers.value = tiers.map((tier) => tier.map(positionForIndex))
+    }
     position.value = pendingPosition ?? Math.round(above + viewport.scrollTop)
-    landmarkTiers.value = options.landmarkTiers().map((tier) => tier.map(positionForIndex))
   }
 
   // Seeks outside the window land the scroller, which is asynchronous (rows are
