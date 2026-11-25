@@ -16,7 +16,7 @@ namespace KitveiHakodesh.Core.SeforimDb
         public int? ResolveRelatedTarget(int fromBookId, int topLineIndex, RelatedBook target)
         {
             using var conn = Open();
-            return new RelatedBookTargetResolver(conn, SchemaOf(conn)).Resolve(fromBookId, topLineIndex, target);
+            return new RelatedBookTargetResolver(conn, SchemaOf(conn), this).Resolve(fromBookId, topLineIndex, target);
         }
     }
 
@@ -37,6 +37,13 @@ namespace KitveiHakodesh.Core.SeforimDb
     /// The same answers as the dropdown's former frontend code (resolveTargetLineIndex and
     /// what it called), from indexed queries rather than one RPC per probe line.
     /// </summary>
+    /// <summary>One link target: the target line's (global) id and its lineIndex.</summary>
+    internal sealed class LinkTargetRow
+    {
+        public int TargetLineId { get; set; }
+        public int LineIndex { get; set; }
+    }
+
     internal sealed class RelatedBookTargetResolver
     {
         private const int BaseLineProbeRadius = 30;
@@ -44,6 +51,7 @@ namespace KitveiHakodesh.Core.SeforimDb
 
         private readonly SqliteConnection _conn;
         private readonly SeforimDbSchema _schema;
+        private readonly SeforimDbQueries _queries;
         private readonly List<int> _dependantTypeIds;
         private readonly HashSet<int> _commentaryShapedTypeIds;
         private readonly BaseTextLookup _bases;
@@ -71,10 +79,11 @@ namespace KitveiHakodesh.Core.SeforimDb
             public bool Contains(int lineIndex) => lineIndex >= Start && (End == null || lineIndex < End);
         }
 
-        public RelatedBookTargetResolver(SqliteConnection conn, SeforimDbSchema schema)
+        public RelatedBookTargetResolver(SqliteConnection conn, SeforimDbSchema schema, SeforimDbQueries queries)
         {
             _conn = conn;
             _schema = schema;
+            _queries = queries;
             var typeNames = SeforimDbQueries.ReadConnectionTypeNames(conn);
             _dependantTypeIds = SeforimDbQueries.DependantTypeIds(typeNames);
             _commentaryShapedTypeIds = new HashSet<int>(typeNames
@@ -136,6 +145,12 @@ namespace KitveiHakodesh.Core.SeforimDb
 
         private int? LineIdAt(int bookId, int lineIndex)
         {
+            // A book of an additional library (global ids): its lines are read through that library.
+            if (bookId >= SeforimDbLibraryId.OffsetUnit)
+            {
+                var rows = _queries.GetLineByBookAndLineIndex(bookId, lineIndex);
+                return rows.Count > 0 ? rows[0].Id : null;
+            }
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "SELECT id FROM line WHERE bookId = @b AND lineIndex = @i LIMIT 1";
             cmd.Parameters.AddWithValue("@b", bookId);
@@ -206,6 +221,13 @@ namespace KitveiHakodesh.Core.SeforimDb
         /// earliest target line.</summary>
         private LinkedLine? LinkTarget(int sourceLineId, int targetBookId)
         {
+            // Lines or books of an additional library: their links are external_link rows, translated by the
+            // queries (forward from the library's own lines; citations of an official line by the library's).
+            if (sourceLineId >= SeforimDbLibraryId.OffsetUnit || targetBookId >= SeforimDbLibraryId.OffsetUnit)
+            {
+                var rows = _queries.LinkTargetsForSourceLineAndBook(_conn, sourceLineId, targetBookId);
+                return rows.Count > 0 ? new LinkedLine(rows[0].TargetLineId, rows[0].LineIndex) : null;
+            }
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = SeforimDbSqlStrings.GetLinkTargetForSourceLineAndBook;
             cmd.Parameters.AddWithValue("@sourceLineId", sourceLineId);

@@ -130,8 +130,8 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
             // The verification fetch reads the matched lines' text only (withPlacement: false):
             // the book id is read afterwards, for the hits that pass, over this one corpus kept
             // for the whole search (opened on first need).
-            SeforimDbFtsCorpus? corpus = null;
-            SeforimDbFtsCorpus Corpus() => corpus ??= engine.OpenCorpus();
+            ISeforimDbFtsPositionCorpus? corpus = null;
+            ISeforimDbFtsPositionCorpus Corpus() => corpus ??= engine.OpenCorpus();
             // Undecodable rows are skipped as empty and counted, never abort the search (issue
             // #13). The scope is entered around each pull only, never across a yield.
             unreadable ??= new SeforimDbFtsUnreadableRows();
@@ -191,7 +191,7 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         /// </summary>
         private static SeforimDbFtsHitBatch BuildBatch(
             Fts5SeforimIndex index,
-            Func<SeforimDbFtsCorpus> corpus,
+            Func<ISeforimDbFtsPositionCorpus> corpus,
             IReadOnlyList<SearchResult> results,
             bool requireOrdered,
             int contextWords,
@@ -234,7 +234,7 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         /// no `line` row keeps book id 0.
         /// </summary>
         private static void FetchPassingBookIds(
-            Func<SeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built)
+            Func<ISeforimDbFtsPositionCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built)
         {
             var passingIds = new List<long>(results.Count);
             for (int i = 0; i < built.Length; i++)
@@ -253,7 +253,7 @@ namespace KitveiHakodesh.Core.SeforimDbFullTextSearch
         /// the page makes for every later row.
         /// </summary>
         private static List<FtsSnippetText> SeedSnippetTexts(
-            Func<SeforimDbFtsCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built, List<int> seeded)
+            Func<ISeforimDbFtsPositionCorpus> corpus, IReadOnlyList<SearchResult> results, FtsHit?[] built, List<int> seeded)
         {
             var texts = new List<FtsSnippetText>(seeded.Count);
             List<long>? shortIds = null;

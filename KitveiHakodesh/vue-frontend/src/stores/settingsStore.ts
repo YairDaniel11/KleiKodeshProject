@@ -80,6 +80,7 @@ const KEYS = {
   SETTINGS_HB_EDITION_SIDE: 'app.hbEditionSide',
   SETTINGS_SHOW_RECENTLY_OPENED: 'app.showRecentlyOpened',
   SETTINGS_SHOW_FREQUENT_FOLDERS: 'app.showFrequentFolders',
+  SETTINGS_SHOW_LIBRARY_BADGE: 'books.showLibraryBadge',
   SETTINGS_RESUME_LAST_READ: 'app.resumeLastRead',
   SETTINGS_TITLE_BAR_HIDDEN_BUTTONS: 'titleBar.hiddenButtons',
   SETTINGS_KEEP_SCREEN_ON_MODE: 'app.keepScreenOn.mode',
@@ -275,6 +276,8 @@ const DEFAULTS = {
   keepScreenOnMode: 'reading' as KeepScreenOnMode,
   // Let the screen sleep after this many minutes with no scroll, key or click; 0 = never.
   keepScreenOnIdleMinutes: 10,
+  // The small "which additional library is this from" tag on catalog cards.
+  showLibraryBadge: true,
 }
 
 /**
@@ -428,6 +431,7 @@ export const useSettingsStore = defineStore('settings', () => {
     return keepScreenOnMode.value !== 'off'
   }
   watch(keepScreenOnMode, (mode) => { if (mode !== 'off') keepScreenOnLastMode.value = mode })
+  const showLibraryBadge = ref(DEFAULTS.showLibraryBadge)
   const fileSearchSortOrder = ref(DEFAULTS.fileSearchSortOrder)
   const errorReportSenderEmail = ref(DEFAULTS.errorReportSenderEmail)
   /** Which layout the book catalog page renders in. */
@@ -629,6 +633,7 @@ export const useSettingsStore = defineStore('settings', () => {
     loadSetting(KEYS.SETTINGS_KEEP_SCREEN_ON_LAST_MODE, keepScreenOnLastMode)
     loadSetting(KEYS.SETTINGS_KEEP_SCREEN_ON_MODE, keepScreenOnMode)
     loadSetting(KEYS.SETTINGS_KEEP_SCREEN_ON_IDLE_MINUTES, keepScreenOnIdleMinutes)
+    loadSetting(KEYS.SETTINGS_SHOW_LIBRARY_BADGE, showLibraryBadge)
     loadSetting(KEYS.SETTINGS_FILE_SEARCH_SORT_ORDER, fileSearchSortOrder)
     loadSetting(KEYS.SETTINGS_ERROR_REPORT_EMAIL, errorReportSenderEmail)
     const storedBooksView = normalizeBooksView(lsGet<string>(KEYS.SETTINGS_BOOKS_VIEW))
@@ -711,6 +716,7 @@ export const useSettingsStore = defineStore('settings', () => {
   persistSetting(keepScreenOnMode, KEYS.SETTINGS_KEEP_SCREEN_ON_MODE)
   persistSetting(keepScreenOnIdleMinutes, KEYS.SETTINGS_KEEP_SCREEN_ON_IDLE_MINUTES)
   persistSetting(keepScreenOnLastMode, KEYS.SETTINGS_KEEP_SCREEN_ON_LAST_MODE)
+  persistSetting(showLibraryBadge, KEYS.SETTINGS_SHOW_LIBRARY_BADGE)
   persistSetting(fileSearchSortOrder, KEYS.SETTINGS_FILE_SEARCH_SORT_ORDER)
   persistSetting(errorReportSenderEmail, KEYS.SETTINGS_ERROR_REPORT_EMAIL)
   persistSetting(booksView, KEYS.SETTINGS_BOOKS_VIEW)
@@ -880,6 +886,7 @@ export const useSettingsStore = defineStore('settings', () => {
     keepScreenOnMode.value = DEFAULTS.keepScreenOnMode
     keepScreenOnIdleMinutes.value = DEFAULTS.keepScreenOnIdleMinutes
     keepScreenOnLastMode.value = DEFAULTS.keepScreenOnMode
+    showLibraryBadge.value = DEFAULTS.showLibraryBadge
     // Both of these have a persist watcher and a stored key, so leaving them out left the
     // key deleted while the ref kept the old value — memory and disk disagreeing until the
     // next reload.
@@ -928,6 +935,7 @@ export const useSettingsStore = defineStore('settings', () => {
     keepScreenOnMode,
     keepScreenOnIdleMinutes,
     toggleKeepScreenOn,
+    showLibraryBadge,
     fileSearchSortOrder,
     errorReportSenderEmail,
     booksView,

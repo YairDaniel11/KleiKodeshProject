@@ -125,6 +125,17 @@ namespace KitveiHakodesh.Core.SeforimDb
         /// connection is what gets read.
         /// </summary>
         public static SeforimDbSchema ForDatabase(DbConnection connection, string databasePath)
+            => ForDatabase(connection, databasePath, "main");
+
+        /// <summary>
+        /// Same as <see cref="ForDatabase(DbConnection, string)"/>, but probes an ATTACHed
+        /// schema instead of the connection's own database. Used for additional libraries
+        /// ATTACHed alongside the primary seforim.db (see
+        /// <see cref="SeforimDbAttachedLibraries"/>) — each one can be its own shape (plain,
+        /// split, compressed), independent of the primary database's shape and of every other
+        /// attached library's.
+        /// </summary>
+        public static SeforimDbSchema ForDatabase(DbConnection connection, string databasePath, string schema)
         {
             if (connection == null) throw new ArgumentNullException(nameof(connection));
 
@@ -132,9 +143,9 @@ namespace KitveiHakodesh.Core.SeforimDb
 
             // No usable key - an in-memory database, or a caller that did not supply a path.
             // Probe every time rather than risk handing one database's shape to another.
-            if (cacheKey == null) return Probe(connection);
+            if (cacheKey == null) return Probe(connection, schema);
 
-            return SchemasByDatabasePath.GetOrAdd(cacheKey, _ => Probe(connection));
+            return SchemasByDatabasePath.GetOrAdd(cacheKey, _ => Probe(connection, schema));
         }
 
         /// <summary>
@@ -179,35 +190,45 @@ namespace KitveiHakodesh.Core.SeforimDb
             }
         }
 
-        /// <summary>Reads the shape straight from the connection, with no caching.</summary>
-        public static SeforimDbSchema Probe(DbConnection connection)
+        /// <summary>Reads the shape straight from the connection's own database ("main"), with
+        /// no caching.</summary>
+        public static SeforimDbSchema Probe(DbConnection connection) => Probe(connection, "main");
+
+        /// <summary>Same as <see cref="Probe(DbConnection)"/>, but against an ATTACHed schema.</summary>
+        public static SeforimDbSchema Probe(DbConnection connection, string schema)
         {
             if (connection == null) throw new ArgumentNullException(nameof(connection));
 
-            bool hasLineContentTable = TableExists(connection, "line_content");
-            bool lineStillHasContentColumn = ColumnExists(connection, "line", "content");
+            bool hasLineContentTable = TableExists(connection, "line_content", schema);
+            bool lineStillHasContentColumn = ColumnExists(connection, "line", "content", schema);
 
             return new SeforimDbSchema(
                 hasSplitLineContent: hasLineContentTable && !lineStillHasContentColumn,
-                hasCompressedContent: TableExists(connection, "zstd_dict"),
-                hasVersionLines: TableExists(connection, "version_line"),
-                hasLinkSuppressedSide: TableExists(connection, "link_suppressed_side"),
-                declaredBaseColumn: ColumnExists(connection, "link", DeclaredBaseColumnOtzaria) ? DeclaredBaseColumnOtzaria
-                    : ColumnExists(connection, "link", DeclaredBaseColumnZayit) ? DeclaredBaseColumnZayit
+                hasCompressedContent: TableExists(connection, "zstd_dict", schema),
+                hasVersionLines: TableExists(connection, "version_line", schema),
+                hasLinkSuppressedSide: TableExists(connection, "link_suppressed_side", schema),
+                declaredBaseColumn: ColumnExists(connection, "link", DeclaredBaseColumnOtzaria, schema)
+                    ? DeclaredBaseColumnOtzaria
+                    : ColumnExists(connection, "link", DeclaredBaseColumnZayit, schema) ? DeclaredBaseColumnZayit
                     : null,
-                hasBookBaseText: TableExists(connection, "book_base_text"));
+                hasBookBaseText: TableExists(connection, "book_base_text", schema));
         }
 
         /// <summary>Forgets every cached probe. For tests, and for a database swapped at runtime.</summary>
         public static void ClearCache() => SchemasByDatabasePath.Clear();
 
         /// <summary>True if the database has a table with this name.</summary>
-        public static bool TableExists(DbConnection connection, string tableName)
+        public static bool TableExists(DbConnection connection, string tableName) => TableExists(connection, tableName, "main");
+
+        /// <summary>Same check against an ATTACHed schema (<paramref name="schema"/> is a SQLite
+        /// schema name — "main" or one of the aliases <see cref="SeforimDbAttachedLibraries"/>
+        /// assigns).</summary>
+        public static bool TableExists(DbConnection connection, string tableName, string schema)
         {
             using (var command = connection.CreateCommand())
             {
                 command.CommandText =
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1";
+                    $"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = $name LIMIT 1";
                 var parameter = command.CreateParameter();
                 parameter.ParameterName = "$name";
                 parameter.Value = tableName;
@@ -217,13 +238,16 @@ namespace KitveiHakodesh.Core.SeforimDb
         }
 
         /// <summary>True if the named table has a column with this name.</summary>
-        public static bool ColumnExists(DbConnection connection, string tableName, string columnName)
+        public static bool ColumnExists(DbConnection connection, string tableName, string columnName) => ColumnExists(connection, tableName, columnName, "main");
+
+        /// <summary>Same check against an ATTACHed schema — see <see cref="TableExists(DbConnection, string, string)"/>.</summary>
+        public static bool ColumnExists(DbConnection connection, string tableName, string columnName, string schema)
         {
             using (var command = connection.CreateCommand())
             {
-                // PRAGMA does not take parameters, and the table name here is always one of
+                // PRAGMA does not take parameters, and the table/schema names here are always
                 // our own literals rather than anything a caller supplies.
-                command.CommandText = "PRAGMA table_info(" + tableName + ")";
+                command.CommandText = $"PRAGMA {schema}.table_info({tableName})";
                 using (var reader = command.ExecuteReader())
                 {
                     while (reader.Read())
