@@ -1,0 +1,364 @@
+name: Build multi-library preview (unofficial updater EXE + portable ZIP)
+
+# Private tooling for the YairDaniel11 fork only. It is NOT part of any upstream pull request
+# and lives on its own ci/* branch. It builds, from any branch/tag/sha of THIS repository
+# (input "source_ref"), the pieces that a Hebrew-RTL Inno Setup "update" EXE replaces inside an
+# existing OFFICIAL KleiKodesh install:
+#     KitveiHakodeshLib.dll, KitveiHakodeshService\ (native-AOT service + e_sqlite3.dll), KitveiHakodesh\ (Vue UI)
+# plus a portable ZIP of the demo app and SHA256SUMS.txt.
+#
+# Re-run on another branch by changing ONLY the inputs:
+#   gh workflow run build-multilib-preview.yml -R YairDaniel11/KleiKodeshProject \
+#     --ref ci/multilib-preview -f source_ref=feature/multi-library-pr -f version=multilib-preview-YYYYMMDD
+#
+# Known, intentional limits (see the release notes):
+#   * FluentChromeTabs lives outside the repo (/ChromeTabs/ is git-ignored) and is not redistributable
+#     from here, so a behaviour-free compile STUB (no tab strip) is generated to let the projects
+#     compile. The stub is NEVER part of the updater EXE; the portable ZIP carries it with a notice.
+#   * No VSTO add-in / official installer is built (needs the VSTO workload + a private signing key).
+#   * The EXE is unsigned (SmartScreen will warn).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch / tag / sha of this repository to build"
+        required: true
+        default: "feature/multi-library-badge-toggle"
+      version:
+        description: "Version label used in file names (e.g. multilib-preview-20261023)"
+        required: true
+        default: "multilib-preview-dev"
+      ui_scope:
+        description: "UI files the updater replaces: index-only (just index.html - the Vue build is a single file; leaves the official pdfjs/fonts/tesseract untouched) or full (whole KitveiHakodesh folder)"
+        required: true
+        type: choice
+        options:
+          - index-only
+          - full
+        default: index-only
+      release_tag:
+        description: "Optional: tag of an EXISTING (draft) release of this repository to attach the built files to (downloads of Actions artifacts can be blocked by a network filter; release assets are not)"
+        required: false
+        default: ""
+  push:
+    branches:
+      - ci/multilib-preview
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      SOURCE_REF: ${{ inputs.source_ref || 'feature/multi-library-badge-toggle' }}
+      VERSION_LABEL: ${{ inputs.version || 'multilib-preview-dev' }}
+      UI_SCOPE: ${{ inputs.ui_scope || 'index-only' }}
+    steps:
+      - name: Keep LF line endings on checkout (the official build is LF; CRLF would make every text file differ)
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - name: Checkout CI assets (this workflow's own ref)
+        uses: actions/checkout@v4
+        with:
+          path: _ci
+
+      - name: Checkout source to build (${{ inputs.source_ref || 'feature/multi-library-badge-toggle' }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || 'feature/multi-library-badge-toggle' }}
+          path: src
+
+      # The source may reference the public FastDocView submodule (the upstream added it in v10.4.0). Only that
+      # one: the others are private or replaced by a stub below. Harmless when the source has no such submodule.
+      - name: Fetch the public FastDocView submodule and its own submodules (if the source uses it)
+        shell: pwsh
+        working-directory: src
+        run: |
+          if (Test-Path ".gitmodules") {
+            $has = (Select-String -Path ".gitmodules" -Pattern "KitveiHakodesh/FastDocView" -Quiet)
+            if ($has) { git submodule update --init --recursive --depth 1 KitveiHakodesh/FastDocView; if ($LASTEXITCODE -ne 0) { throw "FastDocView submodule failed" } }
+            else { Write-Host "No FastDocView submodule in this source." }
+            if (Select-String -Path ".gitmodules" -Pattern "KitveiHakodesh/kleikodesh-zmanim.js" -Quiet) { git submodule update --init --depth 1 KitveiHakodesh/kleikodesh-zmanim.js; if ($LASTEXITCODE -ne 0) { throw "zmanim submodule failed" } }
+          }
+
+      - name: Record what is being built
+        shell: pwsh
+        working-directory: src
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          $msg = (git log -1 --format=%s).Trim()
+          Write-Host "Source ref : $env:SOURCE_REF"
+          Write-Host "Source sha : $sha"
+          Write-Host "Subject    : $msg"
+          Write-Host "Version    : $env:VERSION_LABEL"
+          "SRC_SHA=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "---- tool versions ----"
+          node --version; npm --version
+          Test-Path "C:\Program Files\nodejs\npm.cmd" | ForEach-Object { Write-Host "npm.cmd in Program Files: $_" }
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Stub hb-mirror.json (the maintainer's private mirror config; not in git)
+        shell: pwsh
+        working-directory: src
+        run: |
+          # Newer upstream master refuses to build without this git-ignored file. A '{}' stub lets the
+          # build run; the resulting service has NO HebrewBooks mirror configured (disclosed in the
+          # release notes). It is the only way a fork build can compile.
+          $p = 'KitveiHakodesh/CSharpBackend/KitveiHakodesh.Core/HebrewBooks/hb-mirror.json'
+          if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path (Split-Path $p) | Out-Null; Set-Content -Path $p -Value '{}' -Encoding ascii }
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Vue frontend dependencies
+        shell: pwsh
+        working-directory: src
+        run: npm ci --prefix KitveiHakodesh/vue-frontend
+
+      - name: FluentChromeTabs compile stub (only when the real project is absent)
+        shell: pwsh
+        working-directory: src
+        run: |
+          # /ChromeTabs/ is git-ignored (own repository). Generate the behaviour-free stand-in so the
+          # projects compile. It is never put into the updater payload.
+          # Since v10.4.0 the component sits at KitveiHakodesh/CSharpBackend/ChromeTabs (a private submodule); earlier
+          # sources keep it at the repository root. The projects reference it relative to their own folder.
+          $base = "ChromeTabs"
+          if ((Test-Path ".gitmodules") -and (Select-String -Path ".gitmodules" -Pattern "CSharpBackend/ChromeTabs" -Quiet)) { $base = "KitveiHakodesh/CSharpBackend/ChromeTabs" }
+          $proj = "$base/FluentChromeTabs/FluentChromeTabs.csproj"
+          if (Test-Path $proj) { Write-Host "Real/other FluentChromeTabs project present - not generating a stub."; exit 0 }
+          New-Item -ItemType Directory -Force -Path "$base/FluentChromeTabs" | Out-Null
+          Copy-Item "../_ci/.github/ci-assets/multilib-preview/FluentChromeTabs-stub/*" "$base/FluentChromeTabs/" -Force
+          dotnet restore $proj
+          "STUB_USED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Restore NuGet packages (packages.config projects)
+        shell: pwsh
+        working-directory: src
+        run: |
+          $nuget = Join-Path $env:RUNNER_TEMP "nuget.exe"
+          Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nuget
+          $backend = (Resolve-Path "KitveiHakodesh/CSharpBackend").Path
+          $pkgDir = Join-Path $backend "packages"
+          Get-ChildItem $backend -Recurse -Filter packages.config |
+            Where-Object { $_.FullName -notmatch '\\(node_modules|packages|FtsLib-Csharp)\\' } |
+            ForEach-Object {
+              Write-Host "Restoring $($_.FullName) -> $pkgDir"
+              & $nuget restore $_.FullName -PackagesDirectory $pkgDir -NonInteractive
+              if ($LASTEXITCODE -ne 0) { throw "nuget restore failed for $($_.FullName)" }
+            }
+
+      - name: Build demo app (also publishes the native-AOT service + builds the Vue UI)
+        shell: pwsh
+        working-directory: src
+        run: |
+          $app = if (Test-Path "KitveiHakodesh/CSharpBackend/KitveiHakodeshDesktopApp") { "KitveiHakodeshDesktopApp" } else { "KitveiHakodeshDemoApp" }; $proj = "KitveiHakodesh/CSharpBackend/$app/$app.csproj"
+          msbuild $proj /p:Configuration=Release /p:Platform=AnyCPU /m /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "msbuild failed ($LASTEXITCODE)" }
+          $out = "KitveiHakodesh/CSharpBackend/$app/bin/Release"
+          Write-Host "---- build output (top level) ----"
+          Get-ChildItem $out | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Assemble payload + portable ZIP
+        shell: pwsh
+        working-directory: src
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = if (Test-Path "KitveiHakodesh/CSharpBackend/KitveiHakodeshDesktopApp") { "KitveiHakodeshDesktopApp" } else { "KitveiHakodeshDemoApp" }; $out  = (Resolve-Path "KitveiHakodesh/CSharpBackend/$app/bin/Release").Path
+          $work = Join-Path $env:RUNNER_TEMP "mlp"
+          $payload = Join-Path $work "payload"
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+
+          # --- required pieces must exist
+          foreach ($need in @("KitveiHakodeshLib.dll", "KitveiHakodeshService\KitveiHakodeshService.exe", "KitveiHakodeshService\e_sqlite3.dll", "KitveiHakodesh\index.html")) {
+            if (-not (Test-Path (Join-Path $out $need))) { throw "Build output is missing $need" }
+          }
+
+          # --- payload: ONLY the three things the update replaces
+          Copy-Item (Join-Path $out "KitveiHakodeshLib.dll") $payload
+          $skipDirs = 'SearchExpansion','FtsIndex','CatalogTocIndex','filesystemindex','hb-cache','convert-cache','Dictionary','HebrewBooks','updates'
+          foreach ($top in @("KitveiHakodeshService", "KitveiHakodesh")) {
+            $srcTop = Join-Path $out $top
+            Get-ChildItem $srcTop -Recurse -File | ForEach-Object {
+              $rel = $_.FullName.Substring($srcTop.Length).TrimStart('\')
+              $first = $rel.Split('\')[0]
+              if ($_.Extension -eq '.pdb') { return }
+              if ($_.Name -eq '.build-stamp') { return }
+              if ($rel -ieq 'appsettings.Development.json') { return }
+              if ($top -eq 'KitveiHakodesh' -and $first -like 'webcache*') { return }
+              if ($top -eq 'KitveiHakodesh' -and $env:UI_SCOPE -eq 'index-only' -and $rel -ne 'index.html') { return }
+              if ($top -eq 'KitveiHakodeshService' -and $skipDirs -contains $first) { return }
+              $dest = Join-Path (Join-Path $payload $top) $rel
+              New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+              Copy-Item $_.FullName $dest
+            }
+          }
+
+          # --- the stub / FluentChromeTabs must never be in the payload
+          if (Get-ChildItem $payload -Recurse -File | Where-Object { $_.Name -like 'FluentChromeTabs*' }) { throw "FluentChromeTabs found in payload!" }
+
+          # --- manifest with sha256 of every payload file
+          $files = Get-ChildItem $payload -Recurse -File | ForEach-Object {
+            [pscustomobject]@{
+              path   = $_.FullName.Substring($payload.Length).TrimStart('\')
+              size   = $_.Length
+              sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            }
+          }
+          $manifest = [pscustomobject]@{
+            version = $env:VERSION_LABEL; sourceRef = $env:SOURCE_REF; sourceSha = $env:SRC_SHA
+            builtAtUtc = (Get-Date).ToUniversalTime().ToString('o'); files = @($files)
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $payload "payload-manifest.json") -Encoding utf8
+          Write-Host ("Payload: {0} files, {1:N1} MB" -f $files.Count, (($files | Measure-Object size -Sum).Sum / 1MB))
+
+          # --- portable ZIP = the demo app output as the maintainer ships it (+ the CI stub, disclosed)
+          $portable = Join-Path $work "portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Get-ChildItem $out -Recurse -File | ForEach-Object {
+            if ($_.Extension -eq '.pdb' -or $_.Name -eq '.build-stamp') { return }
+            $rel = $_.FullName.Substring($out.Length).TrimStart('\')
+            if ($rel -like 'KitveiHakodesh\webcache*' -or $rel -like 'KitveiHakodeshService\FtsIndex*') { return }
+            $dest = Join-Path $portable $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+            Copy-Item $_.FullName $dest
+          }
+          Copy-Item "../_ci/.github/ci-assets/multilib-preview/portable/*" $portable -Force
+          $zip = Join-Path $work ("KitveiHakodeshPortable-{0}.zip" -f $env:VERSION_LABEL)
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory($portable, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+          Write-Host ("Portable ZIP: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
+          "MLP_WORK=$work" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify Lib assembly identity (FluentChromeTabs reference must be 1.0.0.0)
+        shell: pwsh
+        working-directory: src
+        run: |
+          $lib = Join-Path $env:MLP_WORK "payload\KitveiHakodeshLib.dll"
+          $fs = [IO.File]::OpenRead($lib)
+          $pe = New-Object System.Reflection.PortableExecutable.PEReader($fs)
+          $md = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+          $self = $md.GetAssemblyDefinition()
+          Write-Host ("Lib identity: {0}, Version={1}" -f $md.GetString($self.Name), $self.Version)
+          $found = $false
+          foreach ($h in $md.AssemblyReferences) {
+            $r = $md.GetAssemblyReference($h)
+            if ($md.GetString($r.Name) -eq 'FluentChromeTabs') { $found = $true; Write-Host ("Lib references FluentChromeTabs, Version={0}" -f $r.Version); if ($r.Version.ToString() -ne '1.0.0.0') { throw 'unexpected FluentChromeTabs version' } }
+          }
+          $pe.Dispose(); $fs.Dispose()
+          if (-not $found) { Write-Host 'Lib has no FluentChromeTabs reference' }
+      - name: Install Inno Setup (if missing)
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup *\ISCC.exe", "C:\Program Files\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup *\ISCC.exe", "C:\Program Files\Inno Setup *\ISCC.exe" -ErrorAction Stop | Select-Object -First 1
+          }
+          Write-Host "ISCC: $($iscc.FullName)"
+          & $iscc.FullName /? 2>&1 | Select-Object -First 3
+          "ISCC=$($iscc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Compile the updater EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = (Resolve-Path "_ci/.github/ci-assets/multilib-preview").Path
+          $outDir = Join-Path $env:MLP_WORK "out"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+          $name = "KleiKodesh-MultiLibrary-Update-$($env:VERSION_LABEL)"
+          & $env:ISCC "/Qp" "/DAppVersion=$($env:VERSION_LABEL)" "/DNumVersion=1.0.0.0" "/DPayloadDir=$(Join-Path $env:MLP_WORK 'payload')" "/DScriptDir=$assets" "/DOutDir=$outDir" "/DOutName=$name" (Join-Path $assets "KleiKodeshMultiLibUpdate.iss")
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          $exe = Join-Path $outDir "$name.exe"
+          if (-not (Test-Path $exe)) { throw "EXE was not produced" }
+          $len = (Get-Item $exe).Length
+          $hdr = [IO.File]::ReadAllBytes($exe)[0..1]
+          Write-Host ("EXE: {0}  {1:N1} MB  header={2}{3}" -f $exe, ($len / 1MB), [char]$hdr[0], [char]$hdr[1])
+          if ($len -lt 5MB) { throw "EXE is suspiciously small" }
+          if ($hdr[0] -ne 0x4D -or $hdr[1] -ne 0x5A) { throw "EXE is not a PE file (no MZ)" }
+          "MLP_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Smoke test the EXE against a synthetic fake official install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fake = Join-Path $env:RUNNER_TEMP "fake_official"
+          function W($rel, $text) { $p = Join-Path $fake $rel; New-Item -ItemType Directory -Force -Path (Split-Path $p -Parent) | Out-Null; Set-Content $p $text -Encoding ascii }
+          W "KleiKodesh.vsto" "vsto-original"; W "KleiKodesh.dll.manifest" "manifest-original"; W "FluentChromeTabs.dll" "real-tabs-original"
+          W "KitveiHakodeshLib.dll" "old-lib"; W "KitveiHakodeshService\KitveiHakodeshService.exe" "old-service"
+          W "KitveiHakodeshService\FtsIndex\idx.bin" "index-data"; W "KitveiHakodesh\index.html" "old-ui"
+          W "KitveiHakodesh\webcache-standalone\cache.bin" "webcache-data"
+          function FileSha($rel) { (Get-FileHash (Join-Path $fake $rel) -Algorithm SHA256).Hash }
+          $keep = "KleiKodesh.vsto","KleiKodesh.dll.manifest","FluentChromeTabs.dll","KitveiHakodeshService\FtsIndex\idx.bin","KitveiHakodesh\webcache-standalone\cache.bin"
+          $before = @{}; $keep | ForEach-Object { $before[$_] = FileSha $_ }
+
+          $a = @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$fake","/LOG=$env:RUNNER_TEMP\smoke1.log")
+          $p = Start-Process -FilePath $env:MLP_EXE -ArgumentList $a -Wait -PassThru
+          Write-Host "run 1 exit code: $($p.ExitCode)"
+          Get-Content "$env:TEMP\KleiKodesh-multilib-update.log" -ErrorAction SilentlyContinue | Write-Host
+          Get-Content "$env:RUNNER_TEMP\smoke1.log" -ErrorAction SilentlyContinue | Select-Object -Last 40 | Write-Host
+          foreach ($k in $keep) { if ((FileSha $k) -ne $before[$k]) { throw "PROTECTED file changed: $k" } }
+          if ((Get-Item (Join-Path $fake "KitveiHakodeshService\KitveiHakodeshService.exe")).Length -lt 1MB) { throw "service exe not replaced" }
+          if ((Get-Content (Join-Path $fake "KitveiHakodeshLib.dll") -Raw) -like "old-lib*") { throw "lib not replaced" }
+          $bk = @(Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter "fake_official.multilib-backup-*")
+          if ($bk.Count -ne 1) { throw "expected exactly one backup folder, found $($bk.Count)" }
+          if ((Get-Content (Join-Path $bk[0].FullName "files\KitveiHakodeshLib.dll") -Raw) -notlike "old-lib*") { throw "backup does not hold the original lib" }
+
+          $p2 = Start-Process -FilePath $env:MLP_EXE -ArgumentList $a -Wait -PassThru
+          Write-Host "run 2 (idempotent) exit code: $($p2.ExitCode)"
+          if ($p2.ExitCode -ne 0) { throw "smoke run 2 failed" }
+          $bk2 = @(Get-ChildItem "$env:RUNNER_TEMP" -Directory -Filter "fake_official.multilib-backup-*")
+          if ($bk2.Count -ne 1) { throw "second run must not create another backup" }
+
+          $p3 = Start-Process -FilePath $env:MLP_EXE -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$env:RUNNER_TEMP\no_such_install") -Wait -PassThru
+          Write-Host "run 3 (no official install) exit code: $($p3.ExitCode)"
+          if ($p3.ExitCode -eq 0) { throw "must fail when the official install is missing" }
+          Write-Host "Smoke test passed."
+
+      - name: Write SHA256SUMS.txt and collect artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:MLP_WORK "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item $env:MLP_EXE $dist
+          Copy-Item (Join-Path $env:MLP_WORK ("KitveiHakodeshPortable-{0}.zip" -f $env:VERSION_LABEL)) $dist
+          Copy-Item (Join-Path $env:MLP_WORK "payload\payload-manifest.json") (Join-Path $dist "payload-manifest.json")
+          $lines = Get-ChildItem $dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          [IO.File]::WriteAllLines((Join-Path $dist "SHA256SUMS.txt"), [string[]]$lines, (New-Object Text.UTF8Encoding $false))
+          Get-ChildItem $dist | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          Get-Content (Join-Path $dist "SHA256SUMS.txt") | Write-Host
+          "DIST=$dist" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: multilib-preview-${{ inputs.version || 'multilib-preview-dev' }}
+          path: ${{ env.DIST }}/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Attach the built files to a release (optional)
+        if: ${{ inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem $env:DIST -File | ForEach-Object { $_.FullName }
+          gh release upload $env:RELEASE_TAG @files --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
